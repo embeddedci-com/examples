@@ -1,0 +1,18 @@
+# Generic rootfs defconfig (arm64) - used by embeddedci-buildroot.yaml
+# Architecture
+BR2_aarch64=y
+BR2_ARM_FPU_VFPV4D16=y
+
+# Internal toolchain (no external dependency)
+BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
+
+# Basic userspace
+BR2_PACKAGE_BUSYBOX=y
+BR2_TARGET_GENERIC_GETTY=y
+BR2_TARGET_GENERIC_GETTY_BAUDRATE_115200=y
+BR2_TARGET_GENERIC_GETTY_TERM="linux"
+
+# Rootfs ext4
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_4=y
+BR2_TARGET_ROOTFS_EXT2_SIZE="64M"
