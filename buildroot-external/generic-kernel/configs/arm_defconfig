@@ -1,0 +1,5 @@
+# Arm (32-bit) kernel-only defconfig
+BR2_arm=y
+BR2_ARM_EABIHF=y
+BR2_ARM_FPU_VFPV4D16=y
+BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
