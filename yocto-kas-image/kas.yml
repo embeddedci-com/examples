@@ -1,0 +1,27 @@
+header:
+  version: 14
+machine: beaglebone
+distro: poky
+target: core-image-minimal
+
+repos:
+  poky:
+    url: https://git.yoctoproject.org/git/poky
+    refspec: kirkstone
+    layers:
+      meta:
+      meta-poky:
+      meta-yocto-bsp:
+
+  meta-openembedded:
+    url: https://git.openembedded.org/meta-openembedded
+    refspec: kirkstone
+    layers:
+      meta-oe:
+      meta-python:
+
+  meta-beaglebone:
+    url: https://github.com/beagleboard/meta-beaglebone.git
+    refspec: kirkstone
+    layers:
+      .:
