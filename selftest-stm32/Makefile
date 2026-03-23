@@ -11,15 +11,16 @@ SIZE    := arm-none-eabi-size
 
 BUILD_DIR := build
 
-HAL_DIR          ?= ../stm32f4xx_hal_driver_src
-CMSIS_DEVICE_DIR ?= ../cmsis_device_f4_src
-CMSIS_CORE_DIR   ?= ../cmsis_core_src/CMSIS/Core
+CUBE_F4 ?= ./STM32CubeF4
+HAL_DIR := $(CUBE_F4)/Drivers/STM32F4xx_HAL_Driver
+CMSIS_DIR := $(CUBE_F4)/Drivers/CMSIS
 
 INCLUDES := \
   -I. \
   -I$(HAL_DIR)/Inc \
-  -I$(CMSIS_DEVICE_DIR)/Include \
-  -I$(CMSIS_CORE_DIR)/Include
+  -I$(HAL_DIR)/Inc/Legacy \
+  -I$(CMSIS_DIR)/Device/ST/STM32F4xx/Include \
+  -I$(CMSIS_DIR)/Include
 
 CFLAGS := \
 	-mcpu=$(CPU) -mthumb -mfpu=$(FPU) -mfloat-abi=$(FLOAT) \
