@@ -27,7 +27,7 @@ static volatile char cmd_buffer[CMD_BUF_SIZE];
 static volatile uint8_t cmd_index = 0;
 static volatile uint8_t cmd_ready = 0;
 
-static volatile uint8_t rx_byte;
+static uint8_t rx_byte;
 static volatile uint32_t wake_count = 0;
 static volatile uint32_t command_count = 0;
 
