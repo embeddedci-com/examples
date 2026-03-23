@@ -7,7 +7,7 @@ target: core-image-minimal
 repos:
   poky:
     url: https://git.yoctoproject.org/git/poky
-    refspec: kirkstone
+    tag: yocto-5.0.16
     layers:
       meta:
       meta-poky:
@@ -15,13 +15,14 @@ repos:
 
   meta-openembedded:
     url: https://git.openembedded.org/meta-openembedded
-    refspec: kirkstone
+    commit: 4d3e2639dec542b58708244662d5ce36810fc510
     layers:
       meta-oe:
       meta-python:
 
-  meta-beaglebone:
-    url: https://github.com/beagleboard/meta-beaglebone.git
-    refspec: kirkstone
+  meta-ti:
+    url: https://git.yoctoproject.org/git/meta-ti
+    commit: accf1c8bcf75d282932ce8b5b18d8b8692fb3842
     layers:
-      .:
+      meta-ti-bsp:
+      meta-beagle:
