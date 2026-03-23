@@ -49,6 +49,7 @@ SRCS := \
 	startup_stm32f446xx.s \
 	$(HAL_DIR)/Src/stm32f4xx_hal.c \
 	$(HAL_DIR)/Src/stm32f4xx_hal_cortex.c \
+	$(HAL_DIR)/Src/stm32f4xx_hal_dma.c \
 	$(HAL_DIR)/Src/stm32f4xx_hal_gpio.c \
 	$(HAL_DIR)/Src/stm32f4xx_hal_rcc.c \
 	$(HAL_DIR)/Src/stm32f4xx_hal_rcc_ex.c \
@@ -62,6 +63,7 @@ OBJS := \
 	$(BUILD_DIR)/startup_stm32f446xx.o \
 	$(BUILD_DIR)/stm32f4xx_hal.o \
 	$(BUILD_DIR)/stm32f4xx_hal_cortex.o \
+	$(BUILD_DIR)/stm32f4xx_hal_dma.o \
 	$(BUILD_DIR)/stm32f4xx_hal_gpio.o \
 	$(BUILD_DIR)/stm32f4xx_hal_rcc.o \
 	$(BUILD_DIR)/stm32f4xx_hal_rcc_ex.o \
@@ -87,6 +89,9 @@ $(BUILD_DIR)/stm32f4xx_hal.o: $(HAL_DIR)/Src/stm32f4xx_hal.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/stm32f4xx_hal_cortex.o: $(HAL_DIR)/Src/stm32f4xx_hal_cortex.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/stm32f4xx_hal_dma.o: $(HAL_DIR)/Src/stm32f4xx_hal_dma.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/stm32f4xx_hal_gpio.o: $(HAL_DIR)/Src/stm32f4xx_hal_gpio.c | $(BUILD_DIR)

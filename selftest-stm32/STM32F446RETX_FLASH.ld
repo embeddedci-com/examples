@@ -36,6 +36,9 @@ SECTIONS
     _ebss = .;
   } > RAM
 
+  /* newlib/libnosys expects this symbol for _sbrk default stub */
+  PROVIDE(end = _ebss);
+
   ._user_heap_stack :
   {
     . = ALIGN(8);
