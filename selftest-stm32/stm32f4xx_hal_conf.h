@@ -13,6 +13,7 @@ extern "C" {
 #define HAL_GPIO_MODULE_ENABLED
 #define HAL_UART_MODULE_ENABLED
 #define HAL_DMA_MODULE_ENABLED
+#define HAL_FLASH_MODULE_ENABLED
 #define HAL_CORTEX_MODULE_ENABLED
 #define HAL_PWR_MODULE_ENABLED
 
@@ -26,12 +27,20 @@ extern "C" {
 #define HSE_VALUE    8000000U
 #endif
 
+#ifndef HSE_STARTUP_TIMEOUT
+#define HSE_STARTUP_TIMEOUT    100U
+#endif
+
 #ifndef LSI_VALUE
 #define LSI_VALUE    32000U
 #endif
 
 #ifndef LSE_VALUE
 #define LSE_VALUE    32768U
+#endif
+
+#ifndef LSE_STARTUP_TIMEOUT
+#define LSE_STARTUP_TIMEOUT    5000U
 #endif
 
 /* ########################## System Configuration ########################## */
@@ -54,6 +63,7 @@ extern "C" {
 #include "stm32f4xx_hal_gpio.h"
 #include "stm32f4xx_hal_uart.h"
 #include "stm32f4xx_hal_dma.h"
+#include "stm32f4xx_hal_flash.h"
 #include "stm32f4xx_hal_cortex.h"
 #include "stm32f4xx_hal_pwr.h"
 
