@@ -43,6 +43,10 @@ extern "C" {
 #define LSE_STARTUP_TIMEOUT    5000U
 #endif
 
+#ifndef EXTERNAL_CLOCK_VALUE
+#define EXTERNAL_CLOCK_VALUE    12288000U
+#endif
+
 /* ########################## System Configuration ########################## */
 
 #define  VDD_VALUE                    3300U
