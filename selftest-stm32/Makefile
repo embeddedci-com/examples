@@ -71,7 +71,7 @@ OBJS := \
 	$(BUILD_DIR)/stm32f4xx_hal_pwr_ex.o \
 	$(BUILD_DIR)/stm32f4xx_hal_uart.o
 
-all: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).bin
+all: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).bin $(BUILD_DIR)/$(TARGET).hex
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -118,6 +118,9 @@ $(BUILD_DIR)/$(TARGET).elf: $(OBJS)
 
 $(BUILD_DIR)/$(TARGET).bin: $(BUILD_DIR)/$(TARGET).elf
 	$(OBJCOPY) -O binary $< $@
+
+$(BUILD_DIR)/$(TARGET).hex: $(BUILD_DIR)/$(TARGET).elf
+	$(OBJCOPY) -O ihex $< $@
 
 clean:
 	rm -rf $(BUILD_DIR)
