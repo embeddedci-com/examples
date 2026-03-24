@@ -1,5 +1,5 @@
 /*
- * STM32 selftest with UART wakeup + line-based commands
+ * STM32 selftest with UART polling + line-based commands
  * GPIO: PC10
  *
  * Commands:
@@ -19,8 +19,6 @@
  * Globals
  * ========================= */
 
-UART_HandleTypeDef huart2;
-
 #define CMD_BUF_SIZE 64
 
 static volatile char cmd_buffer[CMD_BUF_SIZE];
@@ -28,17 +26,16 @@ static volatile uint8_t cmd_index = 0;
 static volatile uint8_t cmd_ready = 0;
 
 static uint8_t rx_byte;
-static volatile uint32_t wake_count = 0;
+static volatile uint32_t rx_byte_count = 0;
 static volatile uint32_t command_count = 0;
 
 /* ========================= */
 
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_USART2_UART_Init(void);
-
-static void uart_start_rx_interrupt(void);
-static void uart_arm_rx(void);
+static void USART1_Init(void);
+static int usart1_read_byte_nonblocking(uint8_t *byte);
+static void uart_process_rx_byte(uint8_t byte);
 static void print_prompt(void);
 static void process_command(char *cmd);
 static void print_help(void);
@@ -51,7 +48,13 @@ static void print_status(void);
 int _write(int file, char *ptr, int len)
 {
     (void)file;
-    HAL_UART_Transmit(&huart2, (uint8_t *)ptr, len, HAL_MAX_DELAY);
+    for (int i = 0; i < len; i++)
+    {
+        while ((USART1->SR & USART_SR_TXE) == 0U)
+        {
+        }
+        USART1->DR = (uint8_t)ptr[i];
+    }
     return len;
 }
 
@@ -65,7 +68,7 @@ int main(void)
     SystemClock_Config();
 
     MX_GPIO_Init();
-    MX_USART2_UART_Init();
+    USART1_Init();
 
     HAL_Delay(50);
 
@@ -73,14 +76,17 @@ int main(void)
     printf("SELFTEST: build=%s %s\r\n", __DATE__, __TIME__);
     printf("SELFTEST: cpu=%lu Hz\r\n", HAL_RCC_GetHCLKFreq());
 
-    uart_start_rx_interrupt();
-
     printf("APP_OK\r\n");
     printf("type a command and press Enter (e.g. help)\r\n");
     print_prompt();
 
     while (1)
     {
+        while (usart1_read_byte_nonblocking(&rx_byte))
+        {
+            uart_process_rx_byte(rx_byte);
+        }
+
         if (cmd_ready)
         {
             cmd_ready = 0;
@@ -90,67 +96,45 @@ int main(void)
             print_prompt();
         }
 
-        __WFI();  /* wakes on SysTick ~1ms and on USART2 RX */
+        __WFI();  /* wakes on SysTick ~1ms */
     }
 }
 
 /* =========================
- * UART RX interrupt
+ * UART RX polling
  * ========================= */
-
-static void uart_arm_rx(void)
-{
-    (void)HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
-}
-
-static void uart_start_rx_interrupt(void)
-{
-    uart_arm_rx();
-}
 
 static void print_prompt(void)
 {
     printf("> ");
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+static int usart1_read_byte_nonblocking(uint8_t *byte)
 {
-    if (huart->Instance == USART2)
+    if ((USART1->SR & USART_SR_RXNE) != 0U)
     {
-        wake_count++;
-
-        if (rx_byte == '\r' || rx_byte == '\n')
-        {
-            if (cmd_index > 0)
-            {
-                cmd_buffer[cmd_index] = '\0';
-                cmd_ready = 1;
-            }
-        }
-        else if (cmd_index < CMD_BUF_SIZE - 1)
-        {
-            cmd_buffer[cmd_index++] = rx_byte;
-        }
-
-        uart_arm_rx();
+        *byte = (uint8_t)(USART1->DR & 0xFFU);
+        return 1;
     }
+    return 0;
 }
 
-void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+static void uart_process_rx_byte(uint8_t byte)
 {
-    if (huart->Instance != USART2)
+    rx_byte_count++;
+
+    if (byte == '\r' || byte == '\n')
     {
-        return;
+        if (cmd_index > 0)
+        {
+            cmd_buffer[cmd_index] = '\0';
+            cmd_ready = 1;
+        }
     }
-
-    /* Overrun/noise can leave UART in error state and stop RX until cleared. */
-    __HAL_UART_CLEAR_OREFLAG(huart);
-    __HAL_UART_CLEAR_NEFLAG(huart);
-    __HAL_UART_CLEAR_FEFLAG(huart);
-    __HAL_UART_CLEAR_PEFLAG(huart);
-
-    huart->ErrorCode = HAL_UART_ERROR_NONE;
-    uart_arm_rx();
+    else if (cmd_index < CMD_BUF_SIZE - 1)
+    {
+        cmd_buffer[cmd_index++] = (char)byte;
+    }
 }
 
 /* =========================
@@ -211,7 +195,7 @@ static void print_status(void)
 
     printf("status:\r\n");
     printf("  pc10=%s\r\n", (state == GPIO_PIN_SET) ? "ON" : "OFF");
-    printf("  wake_count=%lu\r\n", (unsigned long)wake_count);
+    printf("  rx_byte_count=%lu\r\n", (unsigned long)rx_byte_count);
     printf("  command_count=%lu\r\n", (unsigned long)command_count);
     printf("  tick=%lu ms\r\n", (unsigned long)HAL_GetTick());
 }
@@ -237,42 +221,50 @@ static void MX_GPIO_Init(void)
 }
 
 /* =========================
- * UART (USART2 PA2/PA3)
+ * UART (USART1 PA9/PA10) - register-level init
  * ========================= */
 
-static void MX_USART2_UART_Init(void)
+static void USART1_Init(void)
 {
-    __HAL_RCC_USART2_CLK_ENABLE();
-    __HAL_RCC_GPIOA_CLK_ENABLE();
+    /* 1) Enable clocks for GPIOA and USART1 */
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    RCC->APB2ENR |= RCC_APB2ENR_USART1EN;
+    (void)RCC->AHB1ENR;
+    (void)RCC->APB2ENR;
 
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    /* 2) PA9 (TX), PA10 (RX) -> Alternate Function mode */
+    GPIOA->MODER &= ~((3U << (9U * 2U)) | (3U << (10U * 2U)));
+    GPIOA->MODER |= (2U << (9U * 2U)) | (2U << (10U * 2U));
 
-    GPIO_InitStruct.Pin = GPIO_PIN_2 | GPIO_PIN_3;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_PULLUP;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
+    /* PA9 push-pull, high speed */
+    GPIOA->OTYPER &= ~(1U << 9U);
+    GPIOA->OSPEEDR &= ~((3U << (9U * 2U)) | (3U << (10U * 2U)));
+    GPIOA->OSPEEDR |= (2U << (9U * 2U)) | (2U << (10U * 2U));
 
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    /* PA10 pull-up (RX idle high) */
+    GPIOA->PUPDR &= ~((3U << (9U * 2U)) | (3U << (10U * 2U)));
+    GPIOA->PUPDR |= (1U << (10U * 2U));
 
-    huart2.Instance = USART2;
-    huart2.Init.BaudRate = 115200;
-    huart2.Init.WordLength = UART_WORDLENGTH_8B;
-    huart2.Init.StopBits = UART_STOPBITS_1;
-    huart2.Init.Parity = UART_PARITY_NONE;
-    huart2.Init.Mode = UART_MODE_TX_RX;
-    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-    huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+    /* AF7 for USART1 on PA9/PA10 */
+    GPIOA->AFR[1] &= ~((0xFU << ((9U - 8U) * 4U)) | (0xFU << ((10U - 8U) * 4U)));
+    GPIOA->AFR[1] |= (7U << ((9U - 8U) * 4U)) | (7U << ((10U - 8U) * 4U));
 
-    HAL_UART_Init(&huart2);
+    /* 3) USART1 config: 115200 @ 16 MHz, 8N1, polling */
+    USART1->CR1 = 0U;
+    USART1->CR2 = 0U;
+    USART1->CR3 = 0U;
 
-    HAL_NVIC_SetPriority(USART2_IRQn, 5, 0);
-    HAL_NVIC_EnableIRQ(USART2_IRQn);
+    /* BRR = 16,000,000 / 115,200 = 138.888... -> 0x008B (mantissa 8, fraction 11) */
+    USART1->BRR = 0x008BU;
+
+    USART1->CR1 |= USART_CR1_TE | USART_CR1_RE;
+    USART1->CR1 |= USART_CR1_UE;
 }
 
-void USART2_IRQHandler(void)
+void SysTick_Handler(void)
 {
-    HAL_UART_IRQHandler(&huart2);
+    HAL_IncTick();
+    HAL_SYSTICK_IRQHandler();
 }
 
 /* =========================
@@ -290,12 +282,7 @@ void SystemClock_Config(void)
     RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
     RCC_OscInitStruct.HSIState = RCC_HSI_ON;
     RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-    RCC_OscInitStruct.PLL.PLLM = 16;
-    RCC_OscInitStruct.PLL.PLLN = 336;
-    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;
-    RCC_OscInitStruct.PLL.PLLQ = 7;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
 
     HAL_RCC_OscConfig(&RCC_OscInitStruct);
 
@@ -304,10 +291,10 @@ void SystemClock_Config(void)
                                  RCC_CLOCKTYPE_PCLK1 |
                                  RCC_CLOCKTYPE_PCLK2;
 
-    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
     RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
     RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-    HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2);
+    HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0);
 }
