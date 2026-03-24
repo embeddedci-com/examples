@@ -38,6 +38,8 @@ static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 
 static void uart_start_rx_interrupt(void);
+static void uart_arm_rx(void);
+static void print_prompt(void);
 static void process_command(char *cmd);
 static void print_help(void);
 static void print_status(void);
@@ -74,7 +76,8 @@ int main(void)
     uart_start_rx_interrupt();
 
     printf("APP_OK\r\n");
-    printf("type 'help'\r\n");
+    printf("type a command and press Enter (e.g. help)\r\n");
+    print_prompt();
 
     while (1)
     {
@@ -84,9 +87,10 @@ int main(void)
             process_command((char *)cmd_buffer);
             memset((void *)cmd_buffer, 0, CMD_BUF_SIZE);
             cmd_index = 0;
+            print_prompt();
         }
 
-        __WFI();  // low-power wait for UART interrupt
+        __WFI();  /* wakes on SysTick ~1ms and on USART2 RX */
     }
 }
 
@@ -94,9 +98,19 @@ int main(void)
  * UART RX interrupt
  * ========================= */
 
+static void uart_arm_rx(void)
+{
+    (void)HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
+}
+
 static void uart_start_rx_interrupt(void)
 {
-    HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
+    uart_arm_rx();
+}
+
+static void print_prompt(void)
+{
+    printf("> ");
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -118,8 +132,25 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
             cmd_buffer[cmd_index++] = rx_byte;
         }
 
-        HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
+        uart_arm_rx();
     }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance != USART2)
+    {
+        return;
+    }
+
+    /* Overrun/noise can leave UART in error state and stop RX until cleared. */
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    __HAL_UART_CLEAR_NEFLAG(huart);
+    __HAL_UART_CLEAR_FEFLAG(huart);
+    __HAL_UART_CLEAR_PEFLAG(huart);
+
+    huart->ErrorCode = HAL_UART_ERROR_NONE;
+    uart_arm_rx();
 }
 
 /* =========================
