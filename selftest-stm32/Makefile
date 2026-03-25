@@ -43,10 +43,12 @@ LDFLAGS := \
 	-specs=nano.specs \
 	-specs=nosys.specs
 
+STARTUP := startup_stm32f446xx.s
+
 SRCS := \
 	main.c \
 	system_stm32f4xx.c \
-	startup_stm32f446xx.s \
+	$(STARTUP) \
 	$(HAL_DIR)/Src/stm32f4xx_hal.c \
 	$(HAL_DIR)/Src/stm32f4xx_hal_cortex.c \
 	$(HAL_DIR)/Src/stm32f4xx_hal_dma.c \
@@ -82,7 +84,7 @@ $(BUILD_DIR)/main.o: main.c | $(BUILD_DIR)
 $(BUILD_DIR)/system_stm32f4xx.o: system_stm32f4xx.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/startup_stm32f446xx.o: startup_stm32f446xx.s | $(BUILD_DIR)
+$(BUILD_DIR)/startup_stm32f446xx.o: $(STARTUP) | $(BUILD_DIR)
 	$(AS) $(ASFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/stm32f4xx_hal.o: $(HAL_DIR)/Src/stm32f4xx_hal.c | $(BUILD_DIR)
