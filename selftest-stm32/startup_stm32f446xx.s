@@ -37,6 +37,7 @@ g_pfnVectors:
 
 /* Reset handler */
 .section .text.Reset_Handler
+.thumb_func
 Reset_Handler:
     /* Copy .data from FLASH to RAM */
     ldr r0, =_sidata
@@ -83,5 +84,6 @@ Reset_Handler:
 .thumb_set PendSV_Handler, Default_Handler
 .weak SysTick_Handler
 .thumb_set SysTick_Handler, Default_Handler
+.thumb_func
 Default_Handler:
     b .
