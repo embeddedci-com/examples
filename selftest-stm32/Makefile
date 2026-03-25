@@ -47,6 +47,8 @@ STARTUP := startup_stm32f446xx.s
 
 SRCS := \
 	main.c \
+	syscalls.c \
+	sysmem.c \
 	system_stm32f4xx.c \
 	$(STARTUP) \
 	$(HAL_DIR)/Src/stm32f4xx_hal.c \
@@ -61,6 +63,8 @@ SRCS := \
 
 OBJS := \
 	$(BUILD_DIR)/main.o \
+	$(BUILD_DIR)/syscalls.o \
+	$(BUILD_DIR)/sysmem.o \
 	$(BUILD_DIR)/system_stm32f4xx.o \
 	$(BUILD_DIR)/startup_stm32f446xx.o \
 	$(BUILD_DIR)/stm32f4xx_hal.o \
@@ -79,6 +83,12 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 $(BUILD_DIR)/main.o: main.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/syscalls.o: syscalls.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/sysmem.o: sysmem.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/system_stm32f4xx.o: system_stm32f4xx.c | $(BUILD_DIR)
