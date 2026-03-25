@@ -32,13 +32,35 @@ g_pfnVectors:
     .word 0
     .endr
 
-    /* External IRQ 38 = USART2 on STM32F446xx (unused in polling mode) */
+    /* External IRQ 38 slot unused (UART polling mode) */
     .word 0
 
 /* Reset handler */
 .section .text.Reset_Handler
 Reset_Handler:
+    /* Copy .data from FLASH to RAM */
+    ldr r0, =_sidata
+    ldr r1, =_sdata
+    ldr r2, =_edata
+1:
+    cmp r1, r2
+    bcs 2f
+    ldr r3, [r0], #4
+    str r3, [r1], #4
+    b 1b
+2:
+    /* Zero initialize .bss */
+    ldr r1, =_sbss
+    ldr r2, =_ebss
+    movs r3, #0
+3:
+    cmp r1, r2
+    bcs 4f
+    str r3, [r1], #4
+    b 3b
+4:
     bl SystemInit
+    bl __libc_init_array
     bl main
     b .
 
