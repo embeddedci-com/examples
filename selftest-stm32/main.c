@@ -40,6 +40,9 @@ static void print_prompt(void);
 static void process_command(char *cmd);
 static void print_help(void);
 static void print_status(void);
+static void fault_led_prepare(void);
+static void fault_led_delay(volatile uint32_t cycles);
+static void fault_led_blink_loop(uint32_t pulses) __attribute__((noreturn));
 
 /* =========================
  * printf -> UART
@@ -297,4 +300,66 @@ void SystemClock_Config(void)
     RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
     HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0);
+}
+
+/* =========================
+ * Fault indication (PC10 LED)
+ * ========================= */
+
+static void fault_led_prepare(void)
+{
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
+    (void)RCC->AHB1ENR;
+
+    GPIOC->MODER &= ~(3U << (10U * 2U));
+    GPIOC->MODER |= (1U << (10U * 2U));
+    GPIOC->OTYPER &= ~(1U << 10U);
+    GPIOC->PUPDR &= ~(3U << (10U * 2U));
+}
+
+static void fault_led_delay(volatile uint32_t cycles)
+{
+    while (cycles-- != 0U)
+    {
+        __NOP();
+    }
+}
+
+static void fault_led_blink_loop(uint32_t pulses)
+{
+    __disable_irq();
+    fault_led_prepare();
+
+    while (1)
+    {
+        for (uint32_t i = 0; i < pulses; i++)
+        {
+            GPIOC->BSRR = GPIO_BSRR_BS10;
+            fault_led_delay(600000U);
+            GPIOC->BSRR = GPIO_BSRR_BR10;
+            fault_led_delay(250000U);
+        }
+
+        fault_led_delay(1200000U);
+    }
+}
+
+void HardFault_Handler(void)
+{
+    fault_led_blink_loop(1U);
+}
+
+void MemManage_Handler(void)
+{
+    fault_led_blink_loop(2U);
+}
+
+void BusFault_Handler(void)
+{
+    fault_led_blink_loop(3U);
+}
+
+void UsageFault_Handler(void)
+{
+    fault_led_blink_loop(4U);
 }
