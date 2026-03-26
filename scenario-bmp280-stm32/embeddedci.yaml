@@ -1,0 +1,92 @@
+version: 1
+name: stm32 example with scenario
+builds:
+  example-build:
+    targets:
+      - id: nucleo-f446re
+    packs:
+      - id: firmware/stm32-build
+        config:
+          build_system: make
+          cmd: make -j$(nproc)
+          artifact_elf: build/scenario-bmp280.elf
+          artifact_bin: build/scenario-bmp280.bin
+          artifact_hex: build/scenario-bmp280.hex
+          toolchain: arm-none-eabi
+      - id: test/hardware
+        config:
+          platform: nucleo-f446re
+          success_pattern: "stm32 bmp280"
+
+scenarios:
+  drone-altitude-basic:
+    description: "Single rotor lift affects altitude via simulated altimeter"
+
+    environment:
+      simulators:
+        - id: altimeter
+          type: bmp280   # I2C sensor simulation
+          bus: i2c1
+          address: 0x76
+          visuals:
+            - table: right-header
+              row: 1
+              col: 1
+            - table: right-header
+              row: 2
+              col: 1
+
+    initial_state:
+      altitude_ft: 0
+      vertical_speed_fpm: 0
+
+    io_mapping:
+      gpio:
+        rotor_enable:
+          pin: PC10
+          visuals:
+            - table: left-header
+              row: 1
+              col: 1
+          description: "Main rotor on/off"
+
+    behavior:
+      # rules evaluated continuously (e.g. every 100ms tick)
+      rules:
+        - name: rotor_generates_lift
+          when:
+            gpio.rotor_enable: ON
+          then:
+            set:
+              vertical_speed_fpm: 600   # realistic small drone climb (~10 ft/sec)
+
+        - name: no_lift_fall
+          when:
+            gpio.rotor_enable: OFF
+          then:
+            set:
+              vertical_speed_fpm: -300  # descent (~5 ft/sec)
+
+      physics:
+        update:
+          altitude_ft:
+            formula: altitude_ft + (vertical_speed_fpm / 60) * dt_seconds
+    
+    stimuli:
+      timeline:
+        - at: 0s
+          set:
+            gpio.rotor_enable: OFF
+
+        - at: 2s
+          set:
+            gpio.rotor_enable: ON   # 🚀 rotor starts → altitude should rise
+
+        - at: 10s
+          set:
+            gpio.rotor_enable: OFF  # stop rotor → descent
+
+    outputs:
+      sensors:
+        altimeter:
+          altitude_source: altitude_ft

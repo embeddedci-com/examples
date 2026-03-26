@@ -1,0 +1,16 @@
+name: EmbeddedCI
+on: [push]
+
+jobs:
+  submit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Submit job to EmbeddedCI
+        uses: embeddedci-com/submit-job-action@main
+        with:
+          api_url: ${{ secrets.EMBEDDEDCI_API_URL }}
+          api_key: ${{ secrets.EMBEDDEDCI_API_KEY }}
+          source_path: scenario-bmp280-stm32
+
