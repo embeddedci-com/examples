@@ -20,6 +20,12 @@ repos:
       meta-oe:
       meta-python:
 
+  meta-arm:
+    url: https://git.yoctoproject.org/meta-arm
+    branch: scarthgap
+    layers:
+      meta-arm:
+
   meta-ti:
     url: https://git.yoctoproject.org/git/meta-ti
     commit: accf1c8bcf75d282932ce8b5b18d8b8692fb3842
