@@ -1,0 +1,6 @@
+STM32CubeF4/
+build/
+*.elf
+*.bin
+*.hex
+*.map
