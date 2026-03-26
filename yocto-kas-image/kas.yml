@@ -24,6 +24,7 @@ repos:
     url: https://git.yoctoproject.org/meta-arm
     branch: scarthgap
     layers:
+      meta-arm-toolchain:
       meta-arm:
 
   meta-ti:
