@@ -15,7 +15,7 @@ repos:
 
   meta-openembedded:
     url: https://git.openembedded.org/meta-openembedded
-    commit: 4d3e2639dec542b58708244662d5ce36810fc510
+    branch: scarthgap
     layers:
       meta-oe:
       meta-python:
@@ -29,7 +29,7 @@ repos:
 
   meta-ti:
     url: https://git.yoctoproject.org/git/meta-ti
-    commit: accf1c8bcf75d282932ce8b5b18d8b8692fb3842
+    branch: scarthgap
     layers:
       meta-ti-bsp:
       meta-beagle:
