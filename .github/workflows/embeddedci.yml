@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - "scenario-bmp280-stm32/**"
+      - ".github/workflows/embeddedci.yml"
 
 jobs:
   submit:
