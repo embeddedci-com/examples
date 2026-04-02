@@ -63,6 +63,7 @@ static volatile uint8_t cmd_ready = 0;
 static uint8_t rx_byte;
 static volatile uint32_t rx_byte_count = 0;
 static volatile uint32_t command_count = 0;
+static uint8_t rx_last_was_cr = 0U;
 
 static sensor_state_t g_sensor;
 static bmp280_calibration_t g_calib;
@@ -163,17 +164,56 @@ static int usart1_read_byte_nonblocking(uint8_t *byte)
 static void uart_process_rx_byte(uint8_t byte)
 {
     rx_byte_count++;
-    if (byte == '\r' || byte == '\n')
+
+    if (byte == '\r')
     {
+        rx_last_was_cr = 1U;
+        printf("\r\n");
         if (cmd_index > 0U)
         {
             cmd_buffer[cmd_index] = '\0';
             cmd_ready = 1;
         }
+        else
+        {
+            print_prompt();
+        }
     }
-    else if (cmd_index < (CMD_BUF_SIZE - 1U))
+    else if (byte == '\n')
     {
-        cmd_buffer[cmd_index++] = (char)byte;
+        if (rx_last_was_cr)
+        {
+            rx_last_was_cr = 0U;
+            return;
+        }
+        printf("\r\n");
+        if (cmd_index > 0U)
+        {
+            cmd_buffer[cmd_index] = '\0';
+            cmd_ready = 1;
+        }
+        else
+        {
+            print_prompt();
+        }
+    }
+    else if (byte == '\b' || byte == 0x7FU)
+    {
+        if (cmd_index > 0U)
+        {
+            cmd_index--;
+            cmd_buffer[cmd_index] = '\0';
+            printf("\b \b");
+        }
+    }
+    else if (byte >= 32U && byte <= 126U)
+    {
+        rx_last_was_cr = 0U;
+        if (cmd_index < (CMD_BUF_SIZE - 1U))
+        {
+            cmd_buffer[cmd_index++] = (char)byte;
+            printf("%c", (char)byte);
+        }
     }
 }
 
