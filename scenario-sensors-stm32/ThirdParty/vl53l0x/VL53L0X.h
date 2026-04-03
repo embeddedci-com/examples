@@ -2,7 +2,7 @@
 #define VL53L0X_H_
 
 #include <stdbool.h>
-#include "stm32f1xx.h"
+#include "stm32f4xx_hal.h"
 
 
     // register addresses from API vl53l0x_device.h (ordered as listed there)
@@ -120,7 +120,7 @@
 	};
 
 	void VL53L0X_setAddress(struct VL53L0X* dev, uint8_t new_addr);
-    bool VL53L0X_init();
+    bool VL53L0X_init(struct VL53L0X* dev);
 
     void VL53L0X_writeReg(struct VL53L0X* dev, uint8_t reg, uint8_t value);
     void VL53L0X_writeReg16Bit(struct VL53L0X* dev, uint8_t reg, uint16_t value);

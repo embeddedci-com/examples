@@ -17,6 +17,7 @@ CMSIS_DIR := $(CUBE_F4)/Drivers/CMSIS
 
 INCLUDES := \
   -I. \
+  -I./ThirdParty/vl53l0x \
   -I$(HAL_DIR)/Inc \
   -I$(HAL_DIR)/Inc/Legacy \
   -I$(CMSIS_DIR)/Device/ST/STM32F4xx/Include \
@@ -47,6 +48,8 @@ STARTUP := startup_stm32f446xx.s
 
 SRCS := \
 	main.c \
+	ThirdParty/vl53l0x/VL53L0X.c \
+	ThirdParty/vl53l0x/vl53l0x_port.c \
 	syscalls.c \
 	sysmem.c \
 	system_stm32f4xx.c \
@@ -65,6 +68,8 @@ SRCS := \
 
 OBJS := \
 	$(BUILD_DIR)/main.o \
+	$(BUILD_DIR)/VL53L0X.o \
+	$(BUILD_DIR)/vl53l0x_port.o \
 	$(BUILD_DIR)/syscalls.o \
 	$(BUILD_DIR)/sysmem.o \
 	$(BUILD_DIR)/system_stm32f4xx.o \
@@ -90,6 +95,12 @@ $(BUILD_DIR)/main.o: main.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/syscalls.o: syscalls.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/VL53L0X.o: ThirdParty/vl53l0x/VL53L0X.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/vl53l0x_port.o: ThirdParty/vl53l0x/vl53l0x_port.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/sysmem.o: sysmem.c | $(BUILD_DIR)
