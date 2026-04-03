@@ -1,8 +1,9 @@
 /*
  * STM32 scenario app:
- * - USART1 interactive menu
+ * - USART1 interactive menu (line-buffering off for interactive echo)
  * - rotor outputs on PC10/PC11
  * - BMP280 on I2C1 (PB8/PB9), auto-detect 0x76/0x77
+ * - VL53L0X on same bus (default addr 0x29) for bus validation
  */
 
 #include "stm32f4xx_hal.h"
@@ -25,6 +26,15 @@
 #define BMP280_I2C_ADDR1 0x77U
 #define BMP280_TIMEOUT_MS 100U
 #define BMP280_SEA_LEVEL_PA 101325.0f
+
+#define VL53L0X_I2C_ADDR_7B 0x29U
+#define VL53L0X_REG_IDENTIFICATION_MODEL_ID 0xC0U
+#define VL53L0X_MODEL_ID_EXPECTED 0xEEU
+
+#define I2C_SCAN_ADDR_FIRST 0x08U
+#define I2C_SCAN_ADDR_LAST 0x77U
+#define I2C_ISREADY_TRIALS 3U
+#define I2C_ISREADY_TIMEOUT_MS 10U
 
 typedef struct
 {
@@ -56,6 +66,12 @@ typedef struct
     float altitude_m;
 } sensor_state_t;
 
+typedef struct
+{
+    uint8_t detected;
+    uint8_t last_model_id;
+} vl53l0x_state_t;
+
 static volatile char cmd_buffer[CMD_BUF_SIZE];
 static volatile uint8_t cmd_index = 0;
 static volatile uint8_t cmd_ready = 0;
@@ -67,12 +83,16 @@ static uint8_t rx_last_was_cr = 0U;
 
 static sensor_state_t g_sensor;
 static bmp280_calibration_t g_calib;
+static vl53l0x_state_t g_vl53;
+static uint8_t g_i2c1_hw_inited = 0U;
 
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void USART1_Init(void);
 static void I2C1_Init(void);
+static void i2c1_ensure_init(void);
 void HAL_I2C_MspInit(I2C_HandleTypeDef *hi2c);
+void HAL_I2C_MspDeInit(I2C_HandleTypeDef *hi2c);
 static int usart1_read_byte_nonblocking(uint8_t *byte);
 static void uart_process_rx_byte(uint8_t byte);
 static void print_prompt(void);
@@ -86,6 +106,11 @@ static int bmp280_probe_and_init(uint8_t verbose);
 static int bmp280_read_measurement(float *temperature_c, float *pressure_pa, float *altitude_m);
 static int bmp280_read_regs(uint8_t reg, uint8_t *buf, uint16_t len, uint8_t verbose);
 static int bmp280_write_reg(uint8_t reg, uint8_t value, uint8_t verbose);
+static void i2c_dump_hal_context(const char *tag, HAL_StatusTypeDef st);
+static void i2c_dump_hal_error_bits(uint32_t err);
+static void i2c_bus_scan(void);
+static int vl53l0x_read_model_id(uint8_t verbose);
+static int sensor_i2c_deinit(void);
 static const char *hal_status_to_str(HAL_StatusTypeDef status);
 static int32_t bmp280_compensate_temp(int32_t adc_T);
 static uint32_t bmp280_compensate_press(int32_t adc_P);
@@ -113,14 +138,17 @@ int main(void)
     SystemClock_Config();
     MX_GPIO_Init();
     USART1_Init();
-    I2C1_Init();
+    (void)setvbuf(stdout, NULL, _IONBF, 0);
 
     memset(&g_sensor, 0, sizeof(g_sensor));
-    g_sensor.hi2c1.Instance = I2C1;
+    memset(&g_vl53, 0, sizeof(g_vl53));
+    I2C1_Init();
     (void)bmp280_probe_and_init(1U);
+    printf("\r\nVL53L0X model ID read (boot):\r\n");
+    (void)vl53l0x_read_model_id(1U);
 
     HAL_Delay(50);
-    printf("\r\nSCENARIO: stm32 bmp280 + rotor control\r\n");
+    printf("\r\nSCENARIO: stm32 bmp280 + vl53l0x + rotor control\r\n");
     printf("SCENARIO: build=%s %s\r\n", __DATE__, __TIME__);
     printf("SCENARIO: cpu=%lu Hz\r\n", HAL_RCC_GetHCLKFreq());
     printf("SCENARIO: uart=USART1(115200), i2c=I2C1 PB8/PB9\r\n");
@@ -151,6 +179,7 @@ int main(void)
 static void print_prompt(void)
 {
     printf("> ");
+    (void)fflush(stdout);
 }
 
 static int usart1_read_byte_nonblocking(uint8_t *byte)
@@ -206,6 +235,7 @@ static void uart_process_rx_byte(uint8_t byte)
             cmd_index--;
             cmd_buffer[cmd_index] = '\0';
             printf("\b \b");
+            (void)fflush(stdout);
         }
     }
     else if (byte >= 32U && byte <= 126U)
@@ -215,6 +245,7 @@ static void uart_process_rx_byte(uint8_t byte)
         {
             cmd_buffer[cmd_index++] = (char)byte;
             printf("%c", (char)byte);
+            (void)fflush(stdout);
         }
     }
 }
@@ -249,6 +280,21 @@ static void process_command(char *cmd)
     {
         sensor_init_until_key();
     }
+    else if (strcmp(cmd, "i2c scan") == 0)
+    {
+        i2c1_ensure_init();
+        i2c_bus_scan();
+    }
+    else if (strcmp(cmd, "vl53 test") == 0 || strcmp(cmd, "vl53l0x test") == 0)
+    {
+        i2c1_ensure_init();
+        (void)vl53l0x_read_model_id(1U);
+    }
+    else if (strcmp(cmd, "sensor deinit") == 0)
+    {
+        (void)sensor_i2c_deinit();
+        printf("I2C1 deinitialized; use \"sensor init\", \"i2c scan\", or \"vl53 test\" to run I2C1_Init() again.\r\n");
+    }
     else
     {
         printf("unknown: %s\r\n", cmd);
@@ -263,7 +309,10 @@ static void print_help(void)
     printf("  rotors on\r\n");
     printf("  rotors off\r\n");
     printf("  monitor i2c   (reads BMP280 every 1s, press any key to stop)\r\n");
-    printf("  sensor init   (retries BMP280 init every 500ms, press any key to stop)\r\n");
+    printf("  sensor init   (BMP280 + VL53L0X, 500ms retry; I2C scan once at start; any key stops)\r\n");
+    printf("  i2c scan      (HAL_I2C_IsDeviceReady 0x08-0x77, highlights 0x29)\r\n");
+    printf("  vl53 test     (read VL53L0X model ID reg 0xC0; alias: vl53l0x test)\r\n");
+    printf("  sensor deinit (HAL_I2C_DeInit + clear sensor state; re-init via sensor init / i2c scan / vl53 test)\r\n");
 }
 
 static void print_status(void)
@@ -289,6 +338,9 @@ static void print_status(void)
         printf("  bmp280_addr=0x%02X\r\n", g_sensor.i2c_addr_7b);
     }
     printf("  sensor_initialized=%s\r\n", g_sensor.initialized ? "yes" : "no");
+    printf("  vl53l0x_detected=%s last_model_id=0x%02X\r\n",
+           g_vl53.detected ? "yes" : "no",
+           g_vl53.last_model_id);
     if (sensor_ok)
     {
         printf("  temperature=%.2f C\r\n", g_sensor.temperature_c);
@@ -318,6 +370,7 @@ static void monitor_i2c_until_key(void)
     float last_altitude_m = 0.0f;
     uint8_t have_prev = 0U;
 
+    i2c1_ensure_init();
     printf("monitoring BMP280 every 1 second (press any key to stop)\r\n");
     while (1)
     {
@@ -372,8 +425,10 @@ static void sensor_init_until_key(void)
 {
     uint32_t next_init_ms = HAL_GetTick();
     uint32_t init_attempt = 0U;
+    uint8_t did_scan = 0U;
 
-    printf("retrying BMP280 init every 500ms (press any key to stop)\r\n");
+    i2c1_ensure_init();
+    printf("retrying BMP280 + VL53L0X every 500ms (press any key to stop)\r\n");
     while (1)
     {
         if (usart1_read_byte_nonblocking(&rx_byte))
@@ -385,6 +440,12 @@ static void sensor_init_until_key(void)
         uint32_t now = HAL_GetTick();
         if ((int32_t)(now - next_init_ms) >= 0)
         {
+            if (did_scan == 0U)
+            {
+                did_scan = 1U;
+                printf("one-shot I2C scan:\r\n");
+                i2c_bus_scan();
+            }
             init_attempt++;
             printf("sensor init attempt=%lu\r\n", (unsigned long)init_attempt);
             if (bmp280_probe_and_init(1U) == 0)
@@ -394,6 +455,15 @@ static void sensor_init_until_key(void)
             else
             {
                 printf("BMP280 init FAILED\r\n");
+            }
+            printf("VL53L0X check:\r\n");
+            if (vl53l0x_read_model_id(1U) == 0)
+            {
+                printf("VL53L0X read OK\r\n");
+            }
+            else
+            {
+                printf("VL53L0X read FAILED\r\n");
             }
             next_init_ms += 500U;
         }
@@ -630,6 +700,152 @@ static const char *hal_status_to_str(HAL_StatusTypeDef status)
     }
 }
 
+static void i2c_dump_hal_error_bits(uint32_t err)
+{
+    if (err == 0U)
+    {
+        return;
+    }
+    printf(" bits=");
+    if ((err & HAL_I2C_ERROR_BERR) != 0U)
+    {
+        printf("BERR ");
+    }
+    if ((err & HAL_I2C_ERROR_ARLO) != 0U)
+    {
+        printf("ARLO ");
+    }
+    if ((err & HAL_I2C_ERROR_AF) != 0U)
+    {
+        printf("AF ");
+    }
+    if ((err & HAL_I2C_ERROR_OVR) != 0U)
+    {
+        printf("OVR ");
+    }
+    if ((err & HAL_I2C_ERROR_DMA) != 0U)
+    {
+        printf("DMA ");
+    }
+    if ((err & HAL_I2C_ERROR_TIMEOUT) != 0U)
+    {
+        printf("TIMEOUT ");
+    }
+}
+
+static void i2c_dump_hal_context(const char *tag, HAL_StatusTypeDef st)
+{
+    uint32_t err = HAL_I2C_GetError(&g_sensor.hi2c1);
+    printf("%s: HAL=%s(%d) err=0x%08lX state=%u prev=%u errCode=0x%08lX",
+           tag,
+           hal_status_to_str(st),
+           (int)st,
+           (unsigned long)err,
+           (unsigned int)g_sensor.hi2c1.State,
+           (unsigned int)g_sensor.hi2c1.PreviousState,
+           (unsigned long)g_sensor.hi2c1.ErrorCode);
+    i2c_dump_hal_error_bits(err);
+    printf("\r\n");
+}
+
+static void i2c1_ensure_init(void)
+{
+    if (g_i2c1_hw_inited == 0U)
+    {
+        I2C1_Init();
+    }
+}
+
+static void i2c_bus_scan(void)
+{
+    printf("I2C scan 0x%02X-0x%02X IsDeviceReady(trials=%u to=%ums)\r\n",
+           I2C_SCAN_ADDR_FIRST,
+           I2C_SCAN_ADDR_LAST,
+           (unsigned int)I2C_ISREADY_TRIALS,
+           (unsigned int)I2C_ISREADY_TIMEOUT_MS);
+    uint32_t found = 0U;
+    for (uint32_t a = I2C_SCAN_ADDR_FIRST; a <= I2C_SCAN_ADDR_LAST; a++)
+    {
+        HAL_StatusTypeDef st = HAL_I2C_IsDeviceReady(&g_sensor.hi2c1,
+                                                     (uint16_t)(a << 1),
+                                                     I2C_ISREADY_TRIALS,
+                                                     I2C_ISREADY_TIMEOUT_MS);
+        if (st == HAL_OK)
+        {
+            printf("  FOUND 0x%02lX", (unsigned long)a);
+            if (a == (uint32_t)VL53L0X_I2C_ADDR_7B)
+            {
+                printf(" (VL53L0X default addr)");
+            }
+            printf("\r\n");
+            found++;
+        }
+        else
+        {
+            printf("  0x%02lX: %s", (unsigned long)a, hal_status_to_str(st));
+            printf(" err=0x%08lX state=%u", (unsigned long)HAL_I2C_GetError(&g_sensor.hi2c1), (unsigned int)g_sensor.hi2c1.State);
+            i2c_dump_hal_error_bits(HAL_I2C_GetError(&g_sensor.hi2c1));
+            printf("\r\n");
+        }
+    }
+    printf("scan done: found=%lu device(s)\r\n", (unsigned long)found);
+}
+
+static int vl53l0x_read_model_id(uint8_t verbose)
+{
+    uint8_t val = 0U;
+    HAL_StatusTypeDef st = HAL_I2C_Mem_Read(&g_sensor.hi2c1,
+                                            (uint16_t)(VL53L0X_I2C_ADDR_7B << 1),
+                                            VL53L0X_REG_IDENTIFICATION_MODEL_ID,
+                                            I2C_MEMADD_SIZE_8BIT,
+                                            &val,
+                                            1U,
+                                            BMP280_TIMEOUT_MS);
+    g_vl53.last_model_id = val;
+    if (verbose)
+    {
+        printf("VL53L0X reg 0x%02X read: %s data=0x%02X (expect 0x%02X)\r\n",
+               VL53L0X_REG_IDENTIFICATION_MODEL_ID,
+               hal_status_to_str(st),
+               val,
+               VL53L0X_MODEL_ID_EXPECTED);
+        i2c_dump_hal_context("VL53L0X_MemRead", st);
+    }
+    if (st != HAL_OK)
+    {
+        g_vl53.detected = 0U;
+        return -1;
+    }
+    g_vl53.detected = (val == VL53L0X_MODEL_ID_EXPECTED) ? 1U : 0U;
+    if (val == VL53L0X_MODEL_ID_EXPECTED)
+    {
+        if (verbose)
+        {
+            printf("VL53L0X model ID OK\r\n");
+        }
+        return 0;
+    }
+    if (verbose)
+    {
+        printf("VL53L0X model ID mismatch\r\n");
+    }
+    return -1;
+}
+
+static int sensor_i2c_deinit(void)
+{
+    HAL_StatusTypeDef st = HAL_I2C_DeInit(&g_sensor.hi2c1);
+    i2c_dump_hal_context("HAL_I2C_DeInit", st);
+    g_i2c1_hw_inited = 0U;
+    memset(&g_calib, 0, sizeof(g_calib));
+    g_sensor.detected = 0U;
+    g_sensor.initialized = 0U;
+    g_sensor.i2c_addr_7b = 0U;
+    g_vl53.detected = 0U;
+    g_vl53.last_model_id = 0U;
+    return (st == HAL_OK) ? 0 : -1;
+}
+
 static int32_t bmp280_compensate_temp(int32_t adc_T)
 {
     int32_t var1 = ((((adc_T >> 3) - ((int32_t)g_calib.dig_T1 << 1))) * ((int32_t)g_calib.dig_T2)) >> 11;
@@ -692,6 +908,7 @@ static void I2C1_Init(void)
     g_sensor.hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
     g_sensor.hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
     (void)HAL_I2C_Init(&g_sensor.hi2c1);
+    g_i2c1_hw_inited = 1U;
 }
 
 void HAL_I2C_MspInit(I2C_HandleTypeDef *hi2c)
@@ -704,10 +921,19 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef *hi2c)
         GPIO_InitTypeDef GPIO_InitStruct = {0};
         GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9;
         GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
-        GPIO_InitStruct.Pull = GPIO_PULLUP;
+        GPIO_InitStruct.Pull = GPIO_NOPULL;
         GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
         GPIO_InitStruct.Alternate = GPIO_AF4_I2C1;
         HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    }
+}
+
+void HAL_I2C_MspDeInit(I2C_HandleTypeDef *hi2c)
+{
+    if (hi2c->Instance == I2C1)
+    {
+        __HAL_RCC_I2C1_CLK_DISABLE();
+        HAL_GPIO_DeInit(GPIOB, GPIO_PIN_8 | GPIO_PIN_9);
     }
 }
 
