@@ -118,7 +118,7 @@ static int bmp280_read_regs(uint8_t reg, uint8_t *buf, uint16_t len, uint8_t ver
 static int bmp280_write_reg(uint8_t reg, uint8_t value, uint8_t verbose);
 static void i2c_dump_hal_context(const char *tag, HAL_StatusTypeDef st);
 static void i2c_dump_hal_error_bits(uint32_t err);
-static void i2c1_recover_after_bmp280_error(const char *tag);
+static void i2c_recover(void);
 static void i2c_bus_scan(void);
 static int vl53l0x_init(uint8_t verbose);
 static int vl53l0x_read_model_id(uint8_t verbose);
@@ -449,6 +449,8 @@ static void monitor_i2c_until_key(void)
             {
                 g_sensor.read_fail_count++;
                 printf("tick=%lu ms BMP280 read failed\r\n", (unsigned long)now);
+                printf("BMP280 failed -> recovering I2C\r\n");
+                i2c_recover();
             }
             uint16_t range_mm = 0U;
             if (vl53l0x_read_range_mm(&range_mm, 0U) == 0)
@@ -462,6 +464,8 @@ static void monitor_i2c_until_key(void)
             {
                 g_vl53.read_fail_count++;
                 printf("tick=%lu ms VL53L0X read failed\r\n", (unsigned long)now);
+                printf("VL53 failed -> recovering I2C\r\n");
+                i2c_recover();
             }
             next_print_ms += 1000U;
         }
@@ -520,6 +524,8 @@ static void sensor_init_until_key(void)
                 {
                     g_vl53.read_fail_count++;
                     printf("VL53L0X init OK, read FAILED\r\n");
+                    printf("VL53 failed -> recovering I2C\r\n");
+                    i2c_recover();
                 }
             }
             else
@@ -710,7 +716,6 @@ static int bmp280_read_regs(uint8_t reg, uint8_t *buf, uint16_t len, uint8_t ver
     }
     if (status != HAL_OK)
     {
-        i2c1_recover_after_bmp280_error("BMP280_MemRead");
         return -1;
     }
     return 0;
@@ -740,7 +745,6 @@ static int bmp280_write_reg(uint8_t reg, uint8_t value, uint8_t verbose)
     }
     if (status != HAL_OK)
     {
-        i2c1_recover_after_bmp280_error("BMP280_MemWrite");
         return -1;
     }
     return 0;
@@ -811,23 +815,16 @@ static void i2c_dump_hal_context(const char *tag, HAL_StatusTypeDef st)
     printf("\r\n");
 }
 
-static void i2c1_recover_after_bmp280_error(const char *tag)
+static void i2c_recover(void)
 {
-    printf("%s: recovering I2C1 (DeInit + Init)\r\n", tag);
     HAL_StatusTypeDef st = HAL_I2C_DeInit(&g_sensor.hi2c1);
     i2c_dump_hal_context("HAL_I2C_DeInit(recover)", st);
     HAL_Delay(2U);
     g_i2c1_hw_inited = 0U;
-    I2C1_Init();
+    st = HAL_I2C_Init(&g_sensor.hi2c1);
+    i2c_dump_hal_context("HAL_I2C_Init(recover)", st);
+    g_i2c1_hw_inited = (st == HAL_OK) ? 1U : 0U;
     HAL_Delay(2U);
-    if (g_i2c1_hw_inited == 0U)
-    {
-        printf("%s: I2C1 recover FAILED\r\n", tag);
-    }
-    else
-    {
-        printf("%s: I2C1 recover OK\r\n", tag);
-    }
 }
 
 static int i2c1_ensure_init(void)
