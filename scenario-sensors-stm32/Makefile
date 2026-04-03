@@ -1,4 +1,4 @@
-TARGET  := scenario-bmp280
+TARGET  := scenario-sensors
 MCU     := STM32F446xx
 CPU     := cortex-m4
 FPU     := fpv4-sp-d16

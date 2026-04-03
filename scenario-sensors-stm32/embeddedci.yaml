@@ -9,9 +9,9 @@ builds:
         config:
           build_system: make
           cmd: make -j$(nproc)
-          artifact_elf: build/scenario-bmp280.elf
-          artifact_bin: build/scenario-bmp280.bin
-          artifact_hex: build/scenario-bmp280.hex
+          artifact_elf: build/scenario-sensors.elf
+          artifact_bin: build/scenario-sensors.bin
+          artifact_hex: build/scenario-sensors.hex
           toolchain: arm-none-eabi
       - id: test/hardware
         config:

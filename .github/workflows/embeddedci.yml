@@ -2,7 +2,7 @@ name: EmbeddedCI
 on:
   push:
     paths:
-      - "scenario-bmp280-stm32/**"
+      - "scenario-sensors-stm32/**"
       - ".github/workflows/embeddedci.yml"
 
 jobs:
@@ -16,5 +16,5 @@ jobs:
         with:
           api_url: ${{ secrets.EMBEDDEDCI_API_URL }}
           api_key: ${{ secrets.EMBEDDEDCI_API_KEY }}
-          source_path: scenario-bmp280-stm32
+          source_path: scenario-sensors-stm32
 
