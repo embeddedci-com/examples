@@ -81,10 +81,11 @@ static void print_help(void);
 static void print_status(void);
 static void set_rotors(GPIO_PinState state);
 static void monitor_i2c_until_key(void);
-static int bmp280_probe_and_init(void);
+static int bmp280_probe_and_init(uint8_t verbose);
 static int bmp280_read_measurement(float *temperature_c, float *pressure_pa, float *altitude_m);
-static int bmp280_read_regs(uint8_t reg, uint8_t *buf, uint16_t len);
-static int bmp280_write_reg(uint8_t reg, uint8_t value);
+static int bmp280_read_regs(uint8_t reg, uint8_t *buf, uint16_t len, uint8_t verbose);
+static int bmp280_write_reg(uint8_t reg, uint8_t value, uint8_t verbose);
+static const char *hal_status_to_str(HAL_StatusTypeDef status);
 static int32_t bmp280_compensate_temp(int32_t adc_T);
 static uint32_t bmp280_compensate_press(int32_t adc_P);
 static float pressure_to_altitude_m(float pressure_pa);
@@ -115,7 +116,7 @@ int main(void)
 
     memset(&g_sensor, 0, sizeof(g_sensor));
     g_sensor.hi2c1.Instance = I2C1;
-    (void)bmp280_probe_and_init();
+    (void)bmp280_probe_and_init(1U);
 
     HAL_Delay(50);
     printf("\r\nSCENARIO: stm32 bmp280 + rotor control\r\n");
@@ -245,7 +246,7 @@ static void process_command(char *cmd)
     }
     else if (strcmp(cmd, "sensor init") == 0)
     {
-        if (bmp280_probe_and_init() == 0)
+        if (bmp280_probe_and_init(1U) == 0)
         {
             printf("BMP280 init OK (addr=0x%02X)\r\n", g_sensor.i2c_addr_7b);
         }
@@ -373,29 +374,55 @@ static void monitor_i2c_until_key(void)
     }
 }
 
-static int bmp280_probe_and_init(void)
+static int bmp280_probe_and_init(uint8_t verbose)
 {
     uint8_t addresses[2] = {BMP280_I2C_ADDR0, BMP280_I2C_ADDR1};
     uint8_t chip_id = 0U;
+
+    if (verbose)
+    {
+        printf("BMP280 init start\r\n");
+    }
 
     g_sensor.detected = 0U;
     g_sensor.initialized = 0U;
     for (uint32_t i = 0; i < 2U; i++)
     {
         g_sensor.i2c_addr_7b = addresses[i];
-        if (bmp280_read_regs(BMP280_REG_CHIP_ID, &chip_id, 1U) == 0 && chip_id == BMP280_CHIP_ID)
+        if (verbose)
+        {
+            printf("BMP280 init: probe addr=0x%02X\r\n", g_sensor.i2c_addr_7b);
+        }
+
+        if (bmp280_read_regs(BMP280_REG_CHIP_ID, &chip_id, 1U, verbose) == 0 && chip_id == BMP280_CHIP_ID)
         {
             g_sensor.detected = 1U;
+            if (verbose)
+            {
+                printf("BMP280 init: chip id match=0x%02X at addr=0x%02X\r\n", chip_id, g_sensor.i2c_addr_7b);
+            }
             break;
+        }
+        else if (verbose)
+        {
+            printf("BMP280 init: probe miss at addr=0x%02X (chip_id=0x%02X)\r\n", g_sensor.i2c_addr_7b, chip_id);
         }
     }
     if (!g_sensor.detected)
     {
+        if (verbose)
+        {
+            printf("BMP280 init FAILED: no device responded with chip id 0x%02X\r\n", BMP280_CHIP_ID);
+        }
         return -1;
     }
 
-    if (bmp280_write_reg(BMP280_REG_RESET, 0xB6U) != 0)
+    if (bmp280_write_reg(BMP280_REG_RESET, 0xB6U, verbose) != 0)
     {
+        if (verbose)
+        {
+            printf("BMP280 init FAILED: reset write failed\r\n");
+        }
         return -1;
     }
     HAL_Delay(5);
@@ -403,16 +430,36 @@ static int bmp280_probe_and_init(void)
     uint8_t status = 0x01U;
     for (uint32_t tries = 0; tries < 20U && (status & 0x01U) != 0U; tries++)
     {
-        if (bmp280_read_regs(BMP280_REG_STATUS, &status, 1U) != 0)
+        if (bmp280_read_regs(BMP280_REG_STATUS, &status, 1U, verbose) != 0)
         {
+            if (verbose)
+            {
+                printf("BMP280 init FAILED: status read failed (try=%lu)\r\n", (unsigned long)(tries + 1U));
+            }
             return -1;
+        }
+        if (verbose)
+        {
+            printf("BMP280 init: status=0x%02X (try=%lu)\r\n", status, (unsigned long)(tries + 1U));
         }
         HAL_Delay(2);
     }
+    if ((status & 0x01U) != 0U)
+    {
+        if (verbose)
+        {
+            printf("BMP280 init FAILED: status busy timeout\r\n");
+        }
+        return -1;
+    }
 
     uint8_t calib[24];
-    if (bmp280_read_regs(BMP280_REG_CALIB_START, calib, sizeof(calib)) != 0)
+    if (bmp280_read_regs(BMP280_REG_CALIB_START, calib, sizeof(calib), verbose) != 0)
     {
+        if (verbose)
+        {
+            printf("BMP280 init FAILED: calibration read failed\r\n");
+        }
         return -1;
     }
     g_calib.dig_T1 = (uint16_t)((calib[1] << 8) | calib[0]);
@@ -428,16 +475,28 @@ static int bmp280_probe_and_init(void)
     g_calib.dig_P8 = (int16_t)((calib[21] << 8) | calib[20]);
     g_calib.dig_P9 = (int16_t)((calib[23] << 8) | calib[22]);
 
-    if (bmp280_write_reg(BMP280_REG_CONFIG, 0x00U) != 0)
+    if (bmp280_write_reg(BMP280_REG_CONFIG, 0x00U, verbose) != 0)
     {
+        if (verbose)
+        {
+            printf("BMP280 init FAILED: config write failed\r\n");
+        }
         return -1;
     }
-    if (bmp280_write_reg(BMP280_REG_CTRL_MEAS, 0x27U) != 0)
+    if (bmp280_write_reg(BMP280_REG_CTRL_MEAS, 0x27U, verbose) != 0)
     {
+        if (verbose)
+        {
+            printf("BMP280 init FAILED: ctrl_meas write failed\r\n");
+        }
         return -1;
     }
 
     g_sensor.initialized = 1U;
+    if (verbose)
+    {
+        printf("BMP280 init done: addr=0x%02X\r\n", g_sensor.i2c_addr_7b);
+    }
     return 0;
 }
 
@@ -449,7 +508,7 @@ static int bmp280_read_measurement(float *temperature_c, float *pressure_pa, flo
     }
 
     uint8_t raw[6];
-    if (bmp280_read_regs(BMP280_REG_PRESS_MSB, raw, sizeof(raw)) != 0)
+    if (bmp280_read_regs(BMP280_REG_PRESS_MSB, raw, sizeof(raw), 0U) != 0)
     {
         return -1;
     }
@@ -470,34 +529,79 @@ static int bmp280_read_measurement(float *temperature_c, float *pressure_pa, flo
     return 0;
 }
 
-static int bmp280_read_regs(uint8_t reg, uint8_t *buf, uint16_t len)
+static int bmp280_read_regs(uint8_t reg, uint8_t *buf, uint16_t len, uint8_t verbose)
 {
-    if (HAL_I2C_Mem_Read(&g_sensor.hi2c1,
-                         (uint16_t)(g_sensor.i2c_addr_7b << 1),
-                         reg,
-                         I2C_MEMADD_SIZE_8BIT,
-                         buf,
-                         len,
-                         BMP280_TIMEOUT_MS) != HAL_OK)
+    HAL_StatusTypeDef status = HAL_I2C_Mem_Read(&g_sensor.hi2c1,
+                                                (uint16_t)(g_sensor.i2c_addr_7b << 1),
+                                                reg,
+                                                I2C_MEMADD_SIZE_8BIT,
+                                                buf,
+                                                len,
+                                                BMP280_TIMEOUT_MS);
+    if (verbose)
+    {
+        printf("BMP280 I2C READ addr=0x%02X reg=0x%02X len=%u -> %s",
+               g_sensor.i2c_addr_7b,
+               reg,
+               (unsigned int)len,
+               hal_status_to_str(status));
+        if (status != HAL_OK)
+        {
+            printf(" err=0x%08lX", (unsigned long)HAL_I2C_GetError(&g_sensor.hi2c1));
+        }
+        printf("\r\n");
+    }
+    if (status != HAL_OK)
     {
         return -1;
     }
     return 0;
 }
 
-static int bmp280_write_reg(uint8_t reg, uint8_t value)
+static int bmp280_write_reg(uint8_t reg, uint8_t value, uint8_t verbose)
 {
-    if (HAL_I2C_Mem_Write(&g_sensor.hi2c1,
-                          (uint16_t)(g_sensor.i2c_addr_7b << 1),
-                          reg,
-                          I2C_MEMADD_SIZE_8BIT,
-                          &value,
-                          1U,
-                          BMP280_TIMEOUT_MS) != HAL_OK)
+    HAL_StatusTypeDef status = HAL_I2C_Mem_Write(&g_sensor.hi2c1,
+                                                 (uint16_t)(g_sensor.i2c_addr_7b << 1),
+                                                 reg,
+                                                 I2C_MEMADD_SIZE_8BIT,
+                                                 &value,
+                                                 1U,
+                                                 BMP280_TIMEOUT_MS);
+    if (verbose)
+    {
+        printf("BMP280 I2C WRITE addr=0x%02X reg=0x%02X val=0x%02X -> %s",
+               g_sensor.i2c_addr_7b,
+               reg,
+               value,
+               hal_status_to_str(status));
+        if (status != HAL_OK)
+        {
+            printf(" err=0x%08lX", (unsigned long)HAL_I2C_GetError(&g_sensor.hi2c1));
+        }
+        printf("\r\n");
+    }
+    if (status != HAL_OK)
     {
         return -1;
     }
     return 0;
+}
+
+static const char *hal_status_to_str(HAL_StatusTypeDef status)
+{
+    switch (status)
+    {
+    case HAL_OK:
+        return "OK";
+    case HAL_ERROR:
+        return "ERROR";
+    case HAL_BUSY:
+        return "BUSY";
+    case HAL_TIMEOUT:
+        return "TIMEOUT";
+    default:
+        return "UNKNOWN";
+    }
 }
 
 static int32_t bmp280_compensate_temp(int32_t adc_T)
