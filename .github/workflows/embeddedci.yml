@@ -17,4 +17,6 @@ jobs:
           api_url: ${{ secrets.EMBEDDEDCI_API_URL }}
           api_key: ${{ secrets.EMBEDDEDCI_API_KEY }}
           source_path: scenario-sensors-stm32
+          ref: ${{ github.ref }}
+          commit: ${{ github.sha }}
 
