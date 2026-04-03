@@ -81,6 +81,7 @@ static void print_help(void);
 static void print_status(void);
 static void set_rotors(GPIO_PinState state);
 static void monitor_i2c_until_key(void);
+static void sensor_init_until_key(void);
 static int bmp280_probe_and_init(uint8_t verbose);
 static int bmp280_read_measurement(float *temperature_c, float *pressure_pa, float *altitude_m);
 static int bmp280_read_regs(uint8_t reg, uint8_t *buf, uint16_t len, uint8_t verbose);
@@ -246,14 +247,7 @@ static void process_command(char *cmd)
     }
     else if (strcmp(cmd, "sensor init") == 0)
     {
-        if (bmp280_probe_and_init(1U) == 0)
-        {
-            printf("BMP280 init OK (addr=0x%02X)\r\n", g_sensor.i2c_addr_7b);
-        }
-        else
-        {
-            printf("BMP280 init FAILED\r\n");
-        }
+        sensor_init_until_key();
     }
     else
     {
@@ -269,7 +263,7 @@ static void print_help(void)
     printf("  rotors on\r\n");
     printf("  rotors off\r\n");
     printf("  monitor i2c   (reads BMP280 every 1s, press any key to stop)\r\n");
-    printf("  sensor init\r\n");
+    printf("  sensor init   (retries BMP280 init every 500ms, press any key to stop)\r\n");
 }
 
 static void print_status(void)
@@ -370,6 +364,38 @@ static void monitor_i2c_until_key(void)
                 printf("tick=%lu ms BMP280 read failed\r\n", (unsigned long)now);
             }
             next_print_ms += 1000U;
+        }
+    }
+}
+
+static void sensor_init_until_key(void)
+{
+    uint32_t next_init_ms = HAL_GetTick();
+    uint32_t init_attempt = 0U;
+
+    printf("retrying BMP280 init every 500ms (press any key to stop)\r\n");
+    while (1)
+    {
+        if (usart1_read_byte_nonblocking(&rx_byte))
+        {
+            printf("\r\nsensor init retry stopped\r\n");
+            break;
+        }
+
+        uint32_t now = HAL_GetTick();
+        if ((int32_t)(now - next_init_ms) >= 0)
+        {
+            init_attempt++;
+            printf("sensor init attempt=%lu\r\n", (unsigned long)init_attempt);
+            if (bmp280_probe_and_init(1U) == 0)
+            {
+                printf("BMP280 init OK (addr=0x%02X)\r\n", g_sensor.i2c_addr_7b);
+            }
+            else
+            {
+                printf("BMP280 init FAILED\r\n");
+            }
+            next_init_ms += 500U;
         }
     }
 }
