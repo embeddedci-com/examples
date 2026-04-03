@@ -30,6 +30,12 @@
 #define VL53L0X_I2C_ADDR_7B 0x29U
 #define VL53L0X_REG_IDENTIFICATION_MODEL_ID 0xC0U
 #define VL53L0X_MODEL_ID_EXPECTED 0xEEU
+#define VL53L0X_REG_SYSRANGE_START 0x00U
+#define VL53L0X_REG_SYSTEM_INTERRUPT_CLEAR 0x0BU
+#define VL53L0X_REG_RESULT_INTERRUPT_STATUS 0x13U
+#define VL53L0X_REG_RESULT_RANGE_MM 0x1EU
+#define VL53L0X_RANGE_READY_MASK 0x07U
+#define VL53L0X_RANGE_TIMEOUT_MS 100U
 
 #define I2C_SCAN_ADDR_FIRST 0x08U
 #define I2C_SCAN_ADDR_LAST 0x77U
@@ -69,7 +75,11 @@ typedef struct
 typedef struct
 {
     uint8_t detected;
+    uint8_t initialized;
     uint8_t last_model_id;
+    uint16_t last_range_mm;
+    uint32_t read_count;
+    uint32_t read_fail_count;
 } vl53l0x_state_t;
 
 static volatile char cmd_buffer[CMD_BUF_SIZE];
@@ -109,7 +119,9 @@ static int bmp280_write_reg(uint8_t reg, uint8_t value, uint8_t verbose);
 static void i2c_dump_hal_context(const char *tag, HAL_StatusTypeDef st);
 static void i2c_dump_hal_error_bits(uint32_t err);
 static void i2c_bus_scan(void);
+static int vl53l0x_init(uint8_t verbose);
 static int vl53l0x_read_model_id(uint8_t verbose);
+static int vl53l0x_read_range_mm(uint16_t *range_mm, uint8_t verbose);
 static int sensor_i2c_deinit(void);
 static const char *hal_status_to_str(HAL_StatusTypeDef status);
 static int32_t bmp280_compensate_temp(int32_t adc_T);
@@ -144,8 +156,8 @@ int main(void)
     memset(&g_vl53, 0, sizeof(g_vl53));
     I2C1_Init();
     (void)bmp280_probe_and_init(1U);
-    printf("\r\nVL53L0X model ID read (boot):\r\n");
-    (void)vl53l0x_read_model_id(1U);
+    printf("\r\nVL53L0X init (boot):\r\n");
+    (void)vl53l0x_init(1U);
 
     HAL_Delay(50);
     printf("\r\nSCENARIO: stm32 bmp280 + vl53l0x + rotor control\r\n");
@@ -345,6 +357,11 @@ static void print_status(void)
     printf("  vl53l0x_detected=%s last_model_id=0x%02X\r\n",
            g_vl53.detected ? "yes" : "no",
            g_vl53.last_model_id);
+    printf("  vl53l0x_initialized=%s last_range_mm=%u read_count=%lu fail_count=%lu\r\n",
+           g_vl53.initialized ? "yes" : "no",
+           (unsigned int)g_vl53.last_range_mm,
+           (unsigned long)g_vl53.read_count,
+           (unsigned long)g_vl53.read_fail_count);
     if (sensor_ok)
     {
         printf("  temperature=%.2f C\r\n", g_sensor.temperature_c);
@@ -379,7 +396,11 @@ static void monitor_i2c_until_key(void)
         printf("monitor aborted: I2C1 init failed\r\n");
         return;
     }
-    printf("monitoring BMP280 every 1 second (press any key to stop)\r\n");
+    if (vl53l0x_init(1U) != 0)
+    {
+        printf("monitor note: VL53L0X init failed (will retry during reads)\r\n");
+    }
+    printf("monitoring BMP280 + VL53L0X every 1 second (press any key to stop)\r\n");
     while (1)
     {
         if (usart1_read_byte_nonblocking(&rx_byte))
@@ -423,6 +444,19 @@ static void monitor_i2c_until_key(void)
             {
                 g_sensor.read_fail_count++;
                 printf("tick=%lu ms BMP280 read failed\r\n", (unsigned long)now);
+            }
+            uint16_t range_mm = 0U;
+            if (vl53l0x_read_range_mm(&range_mm, 0U) == 0)
+            {
+                g_vl53.read_count++;
+                printf("tick=%lu ms VL53L0X range=%u mm\r\n",
+                       (unsigned long)now,
+                       (unsigned int)range_mm);
+            }
+            else
+            {
+                g_vl53.read_fail_count++;
+                printf("tick=%lu ms VL53L0X read failed\r\n", (unsigned long)now);
             }
             next_print_ms += 1000U;
         }
@@ -468,14 +502,24 @@ static void sensor_init_until_key(void)
             {
                 printf("BMP280 init FAILED\r\n");
             }
-            printf("VL53L0X check:\r\n");
-            if (vl53l0x_read_model_id(1U) == 0)
+            printf("VL53L0X init:\r\n");
+            if (vl53l0x_init(1U) == 0)
             {
-                printf("VL53L0X read OK\r\n");
+                uint16_t range_mm = 0U;
+                if (vl53l0x_read_range_mm(&range_mm, 1U) == 0)
+                {
+                    g_vl53.read_count++;
+                    printf("VL53L0X read OK range=%u mm\r\n", (unsigned int)range_mm);
+                }
+                else
+                {
+                    g_vl53.read_fail_count++;
+                    printf("VL53L0X init OK, read FAILED\r\n");
+                }
             }
             else
             {
-                printf("VL53L0X read FAILED\r\n");
+                printf("VL53L0X init FAILED\r\n");
             }
             next_init_ms += 500U;
         }
@@ -853,6 +897,135 @@ static int vl53l0x_read_model_id(uint8_t verbose)
     return -1;
 }
 
+static int vl53l0x_init(uint8_t verbose)
+{
+    if (vl53l0x_read_model_id(verbose) != 0)
+    {
+        g_vl53.initialized = 0U;
+        return -1;
+    }
+    g_vl53.initialized = 1U;
+    if (verbose)
+    {
+        printf("VL53L0X init OK (basic single-shot ranging)\r\n");
+    }
+    return 0;
+}
+
+static int vl53l0x_read_range_mm(uint16_t *range_mm, uint8_t verbose)
+{
+    if (range_mm == NULL)
+    {
+        return -1;
+    }
+    if (g_vl53.initialized == 0U)
+    {
+        if (vl53l0x_init(verbose) != 0)
+        {
+            return -1;
+        }
+    }
+
+    uint8_t start = 0x01U;
+    HAL_StatusTypeDef st = HAL_I2C_Mem_Write(&g_sensor.hi2c1,
+                                             (uint16_t)(VL53L0X_I2C_ADDR_7B << 1),
+                                             VL53L0X_REG_SYSRANGE_START,
+                                             I2C_MEMADD_SIZE_8BIT,
+                                             &start,
+                                             1U,
+                                             BMP280_TIMEOUT_MS);
+    if (st != HAL_OK)
+    {
+        g_vl53.initialized = 0U;
+        if (verbose)
+        {
+            i2c_dump_hal_context("VL53L0X_StartRange", st);
+        }
+        return -1;
+    }
+
+    uint8_t irq_status = 0U;
+    uint32_t t0 = HAL_GetTick();
+    do
+    {
+        st = HAL_I2C_Mem_Read(&g_sensor.hi2c1,
+                              (uint16_t)(VL53L0X_I2C_ADDR_7B << 1),
+                              VL53L0X_REG_RESULT_INTERRUPT_STATUS,
+                              I2C_MEMADD_SIZE_8BIT,
+                              &irq_status,
+                              1U,
+                              BMP280_TIMEOUT_MS);
+        if (st != HAL_OK)
+        {
+            g_vl53.initialized = 0U;
+            if (verbose)
+            {
+                i2c_dump_hal_context("VL53L0X_PollReady", st);
+            }
+            return -1;
+        }
+        if ((irq_status & VL53L0X_RANGE_READY_MASK) != 0U)
+        {
+            break;
+        }
+        HAL_Delay(2U);
+    } while ((HAL_GetTick() - t0) < VL53L0X_RANGE_TIMEOUT_MS);
+
+    if ((irq_status & VL53L0X_RANGE_READY_MASK) == 0U)
+    {
+        g_vl53.initialized = 0U;
+        if (verbose)
+        {
+            printf("VL53L0X range timeout waiting for ready\r\n");
+        }
+        return -1;
+    }
+
+    uint8_t range_buf[2] = {0U, 0U};
+    st = HAL_I2C_Mem_Read(&g_sensor.hi2c1,
+                          (uint16_t)(VL53L0X_I2C_ADDR_7B << 1),
+                          VL53L0X_REG_RESULT_RANGE_MM,
+                          I2C_MEMADD_SIZE_8BIT,
+                          range_buf,
+                          2U,
+                          BMP280_TIMEOUT_MS);
+    if (st != HAL_OK)
+    {
+        g_vl53.initialized = 0U;
+        if (verbose)
+        {
+            i2c_dump_hal_context("VL53L0X_ReadRange", st);
+        }
+        return -1;
+    }
+
+    uint8_t clear = 0x01U;
+    st = HAL_I2C_Mem_Write(&g_sensor.hi2c1,
+                           (uint16_t)(VL53L0X_I2C_ADDR_7B << 1),
+                           VL53L0X_REG_SYSTEM_INTERRUPT_CLEAR,
+                           I2C_MEMADD_SIZE_8BIT,
+                           &clear,
+                           1U,
+                           BMP280_TIMEOUT_MS);
+    if (st != HAL_OK)
+    {
+        g_vl53.initialized = 0U;
+        if (verbose)
+        {
+            i2c_dump_hal_context("VL53L0X_ClearInterrupt", st);
+        }
+        return -1;
+    }
+
+    *range_mm = (uint16_t)(((uint16_t)range_buf[0] << 8) | (uint16_t)range_buf[1]);
+    g_vl53.last_range_mm = *range_mm;
+    if (verbose)
+    {
+        printf("VL53L0X range read: %u mm\r\n", (unsigned int)(*range_mm));
+    }
+    return 0;
+}
+
 static int sensor_i2c_deinit(void)
 {
     HAL_StatusTypeDef st = HAL_I2C_DeInit(&g_sensor.hi2c1);
@@ -863,7 +1036,11 @@ static int sensor_i2c_deinit(void)
     g_sensor.initialized = 0U;
     g_sensor.i2c_addr_7b = 0U;
     g_vl53.detected = 0U;
+    g_vl53.initialized = 0U;
     g_vl53.last_model_id = 0U;
+    g_vl53.last_range_mm = 0U;
+    g_vl53.read_count = 0U;
+    g_vl53.read_fail_count = 0U;
     return (st == HAL_OK) ? 0 : -1;
 }
 
