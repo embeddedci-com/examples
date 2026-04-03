@@ -90,7 +90,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void USART1_Init(void);
 static void I2C1_Init(void);
-static void i2c1_ensure_init(void);
+static int i2c1_ensure_init(void);
 void HAL_I2C_MspInit(I2C_HandleTypeDef *hi2c);
 void HAL_I2C_MspDeInit(I2C_HandleTypeDef *hi2c);
 static int usart1_read_byte_nonblocking(uint8_t *byte);
@@ -282,13 +282,17 @@ static void process_command(char *cmd)
     }
     else if (strcmp(cmd, "i2c scan") == 0)
     {
-        i2c1_ensure_init();
-        i2c_bus_scan();
+        if (i2c1_ensure_init() == 0)
+        {
+            i2c_bus_scan();
+        }
     }
     else if (strcmp(cmd, "vl53 test") == 0 || strcmp(cmd, "vl53l0x test") == 0)
     {
-        i2c1_ensure_init();
-        (void)vl53l0x_read_model_id(1U);
+        if (i2c1_ensure_init() == 0)
+        {
+            (void)vl53l0x_read_model_id(1U);
+        }
     }
     else if (strcmp(cmd, "sensor deinit") == 0)
     {
@@ -370,7 +374,11 @@ static void monitor_i2c_until_key(void)
     float last_altitude_m = 0.0f;
     uint8_t have_prev = 0U;
 
-    i2c1_ensure_init();
+    if (i2c1_ensure_init() != 0)
+    {
+        printf("monitor aborted: I2C1 init failed\r\n");
+        return;
+    }
     printf("monitoring BMP280 every 1 second (press any key to stop)\r\n");
     while (1)
     {
@@ -427,7 +435,11 @@ static void sensor_init_until_key(void)
     uint32_t init_attempt = 0U;
     uint8_t did_scan = 0U;
 
-    i2c1_ensure_init();
+    if (i2c1_ensure_init() != 0)
+    {
+        printf("sensor init aborted: I2C1 init failed\r\n");
+        return;
+    }
     printf("retrying BMP280 + VL53L0X every 500ms (press any key to stop)\r\n");
     while (1)
     {
@@ -748,12 +760,21 @@ static void i2c_dump_hal_context(const char *tag, HAL_StatusTypeDef st)
     printf("\r\n");
 }
 
-static void i2c1_ensure_init(void)
+static int i2c1_ensure_init(void)
 {
+    if (g_i2c1_hw_inited != 0U)
+    {
+        return 0;
+    }
+
+    printf("I2C1 init requested\r\n");
+    I2C1_Init();
     if (g_i2c1_hw_inited == 0U)
     {
-        I2C1_Init();
+        printf("I2C1 init failed; scan/read operations are blocked\r\n");
+        return -1;
     }
+    return 0;
 }
 
 static void i2c_bus_scan(void)
@@ -907,8 +928,18 @@ static void I2C1_Init(void)
     g_sensor.hi2c1.Init.OwnAddress2 = 0U;
     g_sensor.hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
     g_sensor.hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-    (void)HAL_I2C_Init(&g_sensor.hi2c1);
-    g_i2c1_hw_inited = 1U;
+    HAL_StatusTypeDef st = HAL_I2C_Init(&g_sensor.hi2c1);
+    i2c_dump_hal_context("HAL_I2C_Init", st);
+    if (st == HAL_OK)
+    {
+        g_i2c1_hw_inited = 1U;
+        printf("I2C1 init OK\r\n");
+    }
+    else
+    {
+        g_i2c1_hw_inited = 0U;
+        printf("I2C1 init FAILED\r\n");
+    }
 }
 
 void HAL_I2C_MspInit(I2C_HandleTypeDef *hi2c)
@@ -932,6 +963,8 @@ void HAL_I2C_MspDeInit(I2C_HandleTypeDef *hi2c)
 {
     if (hi2c->Instance == I2C1)
     {
+        __HAL_RCC_I2C1_FORCE_RESET();
+        __HAL_RCC_I2C1_RELEASE_RESET();
         __HAL_RCC_I2C1_CLK_DISABLE();
         HAL_GPIO_DeInit(GPIOB, GPIO_PIN_8 | GPIO_PIN_9);
     }
