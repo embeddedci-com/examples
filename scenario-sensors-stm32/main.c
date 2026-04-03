@@ -816,8 +816,10 @@ static void i2c1_recover_after_bmp280_error(const char *tag)
     printf("%s: recovering I2C1 (DeInit + Init)\r\n", tag);
     HAL_StatusTypeDef st = HAL_I2C_DeInit(&g_sensor.hi2c1);
     i2c_dump_hal_context("HAL_I2C_DeInit(recover)", st);
+    HAL_Delay(2U);
     g_i2c1_hw_inited = 0U;
     I2C1_Init();
+    HAL_Delay(2U);
     if (g_i2c1_hw_inited == 0U)
     {
         printf("%s: I2C1 recover FAILED\r\n", tag);
