@@ -124,6 +124,8 @@ static const char *hal_status_to_str(HAL_StatusTypeDef status);
 static int32_t bmp280_compensate_temp(int32_t adc_T);
 static uint32_t bmp280_compensate_press(int32_t adc_P);
 static float pressure_to_altitude_m(float pressure_pa);
+static int32_t round_float_to_int(float value);
+static int32_t round_float_to_centi(float value);
 static void fault_led_prepare(void);
 static void fault_led_delay(volatile uint32_t cycles);
 static void fault_led_blink_loop(uint32_t pulses) __attribute__((noreturn));
@@ -366,9 +368,21 @@ static void print_status(void)
            (unsigned long)g_vl53.read_fail_count);
     if (sensor_ok)
     {
-        printf("  temperature=%.2f C\r\n", g_sensor.temperature_c);
-        printf("  pressure=%.2f Pa\r\n", g_sensor.pressure_pa);
-        printf("  altitude=%.2f m\r\n", g_sensor.altitude_m);
+        int32_t temp_centi = round_float_to_centi(g_sensor.temperature_c);
+        int32_t altitude_centi = round_float_to_centi(g_sensor.altitude_m);
+        int32_t pressure_pa_i = round_float_to_int(g_sensor.pressure_pa);
+        uint32_t temp_abs_centi = (temp_centi < 0) ? (uint32_t)(-temp_centi) : (uint32_t)temp_centi;
+        uint32_t altitude_abs_centi = (altitude_centi < 0) ? (uint32_t)(-altitude_centi) : (uint32_t)altitude_centi;
+
+        printf("  temperature=%s%lu.%02lu C\r\n",
+               (temp_centi < 0) ? "-" : "",
+               (unsigned long)(temp_abs_centi / 100U),
+               (unsigned long)(temp_abs_centi % 100U));
+        printf("  pressure=%ld Pa\r\n", (long)pressure_pa_i);
+        printf("  altitude=%s%lu.%02lu m\r\n",
+               (altitude_centi < 0) ? "-" : "",
+               (unsigned long)(altitude_abs_centi / 100U),
+               (unsigned long)(altitude_abs_centi % 100U));
     }
     else
     {
@@ -421,6 +435,11 @@ static void monitor_i2c_until_key(void)
             if (bmp280_read_measurement(&g_sensor.temperature_c, &g_sensor.pressure_pa, &g_sensor.altitude_m) == 0)
             {
                 g_sensor.read_count++;
+                int32_t temp_centi = round_float_to_centi(g_sensor.temperature_c);
+                int32_t altitude_centi = round_float_to_centi(g_sensor.altitude_m);
+                int32_t pressure_pa_i = round_float_to_int(g_sensor.pressure_pa);
+                uint32_t temp_abs_centi = (temp_centi < 0) ? (uint32_t)(-temp_centi) : (uint32_t)temp_centi;
+                uint32_t altitude_abs_centi = (altitude_centi < 0) ? (uint32_t)(-altitude_centi) : (uint32_t)altitude_centi;
                 const char *trend = "-";
                 if (have_prev)
                 {
@@ -437,11 +456,15 @@ static void monitor_i2c_until_key(void)
                         trend = "flat";
                     }
                 }
-                printf("tick=%lu ms temp=%.2f C pressure=%.2f Pa altitude=%.2f m trend=%s\r\n",
+                printf("tick=%lu ms temp=%s%lu.%02lu C pressure=%ld Pa altitude=%s%lu.%02lu m trend=%s\r\n",
                        (unsigned long)now,
-                       g_sensor.temperature_c,
-                       g_sensor.pressure_pa,
-                       g_sensor.altitude_m,
+                       (temp_centi < 0) ? "-" : "",
+                       (unsigned long)(temp_abs_centi / 100U),
+                       (unsigned long)(temp_abs_centi % 100U),
+                       (long)pressure_pa_i,
+                       (altitude_centi < 0) ? "-" : "",
+                       (unsigned long)(altitude_abs_centi / 100U),
+                       (unsigned long)(altitude_abs_centi % 100U),
                        trend);
                 last_altitude_m = g_sensor.altitude_m;
                 have_prev = 1U;
@@ -1045,6 +1068,20 @@ static uint32_t bmp280_compensate_press(int32_t adc_P)
 static float pressure_to_altitude_m(float pressure_pa)
 {
     return 44330.0f * (1.0f - powf(pressure_pa / BMP280_SEA_LEVEL_PA, 0.1903f));
+}
+
+static int32_t round_float_to_int(float value)
+{
+    if (value >= 0.0f)
+    {
+        return (int32_t)(value + 0.5f);
+    }
+    return (int32_t)(value - 0.5f);
+}
+
+static int32_t round_float_to_centi(float value)
+{
+    return round_float_to_int(value * 100.0f);
 }
 
 static void MX_GPIO_Init(void)
