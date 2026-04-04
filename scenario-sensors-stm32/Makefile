@@ -11,7 +11,7 @@ SIZE    := arm-none-eabi-size
 
 BUILD_DIR := build
 
-CUBE_F4 ?= ./STM32CubeF4
+CUBE_F4 ?= /opt/STM32CubeF4
 HAL_DIR := $(CUBE_F4)/Drivers/STM32F4xx_HAL_Driver
 CMSIS_DIR := $(CUBE_F4)/Drivers/CMSIS
 
