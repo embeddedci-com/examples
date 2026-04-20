@@ -16,7 +16,7 @@ builds:
       - id: test/hardware
         config:
           platform: nucleo-f446re
-          success_pattern: "stm32 bmp280"
+          boot_success_pattern: "APP_OK"
 
 scenarios:
   # Built-in scenario: drone altitude HIL (registry profile + adapter wiring).
