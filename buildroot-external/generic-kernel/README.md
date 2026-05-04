@@ -5,7 +5,7 @@ Minimal Buildroot external tree for kernel-only builds. Architecture is chosen b
 ## Layout
 
 - **external.desc**, **external.mk**, **Config.in** — Required BR2_EXTERNAL glue.
-- **configs/** — Buildroot defconfigs (e.g. `arm_defconfig`, `arm64_defconfig`). Add more `*_defconfig` files as needed; set pack **`defconfig`** to the corresponding make target name. Base configs enable `BR2_LINUX_KERNEL_DTS_SUPPORT=y`; **`BR2_LINUX_KERNEL_INTREE_DTS_NAME`** is set by `system/buildroot-kernel` from board **dtbs:** when present.
+- **configs/** — Buildroot defconfigs (e.g. `arm_defconfig`, `arm64_defconfig`). Add more `*_defconfig` files as needed; set pack **`defconfig`** to the corresponding make target name. `system/buildroot-kernel` enables `BR2_LINUX_KERNEL=y` and, when board **dtbs:** is non-empty, also forces `BR2_LINUX_KERNEL_DTS_SUPPORT=y` and sets `BR2_LINUX_KERNEL_INTREE_DTS_NAME` to the DTS basenames before running the build.
 
 ## Usage
 
