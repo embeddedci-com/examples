@@ -5,7 +5,7 @@ Minimal Buildroot external tree for kernel-only builds. Architecture is chosen b
 ## Layout
 
 - **external.desc**, **external.mk**, **Config.in** — Required BR2_EXTERNAL glue.
-- **configs/** — Defconfigs: `arm_defconfig`, `arm64_defconfig`.
+- **configs/** — Buildroot defconfigs (e.g. `arm_defconfig`, `arm64_defconfig`). Add more `*_defconfig` files as needed; set pack **`defconfig`** to the corresponding make target name. Base configs enable `BR2_LINUX_KERNEL_DTS_SUPPORT=y`; **`BR2_LINUX_KERNEL_INTREE_DTS_NAME`** is set by `system/buildroot-kernel` from board **dtbs:** when present.
 
 ## Usage
 
@@ -15,9 +15,9 @@ In `embeddedci-buildroot.yaml`:
 - id: system/buildroot-kernel
   config:
     source: git+https://github.com/embeddedci-com/examples.git//buildroot-external/generic-kernel?ref=main
-    defconfig: arm_defconfig   # or arm64_defconfig
+    defconfig: arm_defconfig   # or any *_defconfig name under configs/
     ref: v6.12
     arch: arm64
 ```
 
-Kernel image naming and staging are handled by the `system/buildroot-kernel` pack script (`Image` for arm64, `zImage` for arm), with optional DTBs copied into `kernel/dtbs/`.
+Kernel images and DTBs installed by Buildroot under `$O/images/` are staged into `kernel/` (and `kernel/dtbs/`) for artifact upload.
