@@ -137,7 +137,21 @@ $(BUILD_DIR)/$(TARGET).hex: $(BUILD_DIR)/$(TARGET).elf
 clean:
 	rm -rf $(BUILD_DIR)
 
+OPENOCD        ?= openocd
+OPENOCD_IFACE  ?= interface/cmsis-dap.cfg
+OPENOCD_TARGET ?= target/stm32f4x.cfg
+
+# Connect under reset by default so the debugger can attach even when the MCU
+# gates SWD ("Failed to read memory at 0xe000edf4" / "Examination failed").
+# Set CONNECT_UNDER_RESET=0 to disable.
+CONNECT_UNDER_RESET ?= 1
+ifeq ($(CONNECT_UNDER_RESET),1)
+OPENOCD_RESET := -c "reset_config srst_only srst_nogate connect_assert_srst"
+endif
+
 flash: $(BUILD_DIR)/$(TARGET).elf
-	st-flash write $(BUILD_DIR)/$(TARGET).bin 0x08000000
+	$(OPENOCD) -f $(OPENOCD_IFACE) -c "transport select swd" -f $(OPENOCD_TARGET) \
+		$(OPENOCD_RESET) \
+		-c "program $(BUILD_DIR)/$(TARGET).elf verify reset exit"
 
 .PHONY: all clean flash
