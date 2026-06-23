@@ -21,7 +21,7 @@ jobs:
   selftest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # --- Build the firmware (arm-none-eabi + STM32CubeF4 HAL) ---
       - name: Install ARM toolchain
@@ -34,18 +34,24 @@ jobs:
         # tunnel to the device. Small; only needed at flash/test time.
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends openocd
 
-      - name: Fetch STM32CubeF4 HAL (sparse — only the Drivers/ paths the Makefile uses)
+      - name: Fetch STM32CubeF4 HAL
+        # The HAL driver and the CMSIS device headers are git SUBMODULES of STM32CubeF4 (separate
+        # repos), so a plain clone leaves them empty. Sparse-checkout just Drivers/CMSIS (for the
+        # core CMSIS Include/), then init only the two submodules the Makefile actually needs —
+        # avoids pulling the huge Projects/ and the dozens of BSP/Middleware submodules.
         run: |
           git clone --depth 1 --filter=blob:none --sparse \
             https://github.com/STMicroelectronics/STM32CubeF4 selftest-stm32/STM32CubeF4
-          git -C selftest-stm32/STM32CubeF4 sparse-checkout set \
-            Drivers/STM32F4xx_HAL_Driver Drivers/CMSIS/Include Drivers/CMSIS/Device/ST/STM32F4xx
+          cd selftest-stm32/STM32CubeF4
+          git sparse-checkout set Drivers/CMSIS
+          git submodule update --init --depth 1 \
+            Drivers/STM32F4xx_HAL_Driver Drivers/CMSIS/Device/ST/STM32F4xx
 
       - name: Build selftest.elf
         run: make -C selftest-stm32 CUBE_F4="$GITHUB_WORKSPACE/selftest-stm32/STM32CubeF4"
 
       # --- Run it on benchpod-v1.0.0 over the cloud ---
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
