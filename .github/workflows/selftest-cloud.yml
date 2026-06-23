@@ -56,9 +56,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install pytest + the embeddedci SDK (cloud extra)
-        # embeddedci[cloud] pulls pyserial + websocket-client; pytest is NOT a runtime dep of the
-        # SDK (it's a pytest *plugin*), so install the runner explicitly.
-        run: pip install pytest "embeddedci[cloud]"
+        # Pinned to git main while testing the cloud fixes (swap back to the PyPI release
+        # `pip install pytest "embeddedci[cloud]"` once a version with them is published).
+        # pytest is NOT a runtime dep of the SDK (it's a pytest *plugin*), so install it explicitly.
+        run: |
+          pip install pytest \
+            "embeddedci[cloud] @ git+https://github.com/embeddedci-com/embeddedci-python.git@main#subdirectory=packages/embeddedci"
 
       - name: Self-test on benchpod-v1.0.0 (cloud)
         run: |
