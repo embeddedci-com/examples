@@ -19,11 +19,21 @@ options and default sensibly; override per your bench with ``--benchpod-swclk`` 
 import pytest
 
 
+@pytest.fixture
+def dut(benchpod, pins):
+    """The BenchPod for the test, with a guaranteed clean shutdown: the target-power eFuse is
+    switched OFF at teardown whether the test passes, fails, or errors — so we never leave the
+    DUT powered on. (Fixture teardown also lets pytest report a power-off problem separately
+    instead of masking the real test failure.)"""
+    yield benchpod
+    benchpod.power_off(pins.efuse)
+
+
 @pytest.mark.hardware
-def test_selftest_boots_over_cloud(benchpod, pins, firmware):
+def test_selftest_boots_over_cloud(dut, pins, firmware):
     """Flash selftest.elf to benchpod-v1.0.0 over the cloud and assert it boots cleanly."""
     # 1) Flash the freshly built firmware to the DUT over the cloud (SWD via the BenchPod).
-    result = benchpod.flash(
+    result = dut.flash(
         file=firmware,
         target="target/stm32f4x.cfg",
         swclk=pins.swclk,
@@ -36,7 +46,7 @@ def test_selftest_boots_over_cloud(benchpod, pins, firmware):
     # 2) Power-cycle the target and capture its UART boot output. We reboot via the
     #    target-power eFuse (NRST is unreliable on this bench), scheduling the power-on
     #    inside the capture window so the boot banner lands in it.
-    capture = benchpod.power_cycle_and_capture(
+    capture = dut.power_cycle_and_capture(
         rx=pins.uart_rx,
         tx=pins.uart_tx,
         efuse=pins.efuse,

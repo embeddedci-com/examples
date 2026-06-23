@@ -29,10 +29,16 @@ jobs:
         with:
           release: "13.2.Rel1"   # official Arm GNU toolchain, pinned + cached across runs
 
-      - name: Install OpenOCD
-        # What the SDK shells out to for flashing — it bridges remote_bitbang through the cloud
-        # tunnel to the device. Small; only needed at flash/test time.
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends openocd
+      - name: Install xPack OpenOCD
+        # The SDK flashes via OpenOCD's remote_bitbang adapter in SWD mode, which it bridges through
+        # the cloud tunnel to the device. SWD support for remote_bitbang exists only in OpenOCD
+        # *master* (post-0.12.0) — Ubuntu's apt openocd 0.12.0 is jtag_only and fails with
+        # "Can't change session's transport". xPack OpenOCD ships a master snapshot that has it.
+        run: |
+          V=0.12.0-7
+          curl -fsSL "https://github.com/xpack-dev-tools/openocd-xpack/releases/download/v$V/xpack-openocd-$V-linux-x64.tar.gz" \
+            | sudo tar xz -C /opt
+          echo "/opt/xpack-openocd-$V/bin" >> "$GITHUB_PATH"
 
       - name: Fetch STM32CubeF4 HAL
         # The HAL driver and the CMSIS device headers are git SUBMODULES of STM32CubeF4 (separate
