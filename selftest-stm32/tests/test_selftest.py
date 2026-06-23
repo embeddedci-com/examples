@@ -32,7 +32,10 @@ def dut(benchpod, pins):
 @pytest.mark.hardware
 def test_selftest_boots_over_cloud(dut, pins, firmware):
     """Flash selftest.elf to benchpod-v1.0.0 over the cloud and assert it boots cleanly."""
-    # 1) Flash the freshly built firmware to the DUT over the cloud (SWD via the BenchPod).
+    # 1) Flash the freshly built firmware to the DUT over the cloud. flash() drives
+    #    OpenOCD's CMSIS-DAP backend through the pod; ``target=`` is a normal OpenOCD
+    #    config, so swapping it (stm32f4x.cfg, stm32h7x.cfg, nrf52.cfg, ...) is all it
+    #    takes to support a different board.
     result = dut.flash(
         file=firmware,
         target="target/stm32f4x.cfg",
@@ -43,17 +46,21 @@ def test_selftest_boots_over_cloud(dut, pins, firmware):
     )
     assert result.ok, f"flash failed; openocd output:\n{result.stdout}"
 
-    # 2) Power-cycle the target and capture its UART boot output. We reboot via the
-    #    target-power eFuse (NRST is unreliable on this bench), scheduling the power-on
-    #    inside the capture window so the boot banner lands in it.
-    capture = dut.power_cycle_and_capture(
-        rx=pins.uart_rx,
-        tx=pins.uart_tx,
-        efuse=pins.efuse,
-        delay=1.0,
-        duration=6.0,
-        until=r"APP_OK",
-    )
+    # 2) Read the boot banner with an event-based UART session. Schedule a pod-side
+    #    power-on (returns immediately), then open the session BEFORE it fires so the
+    #    banner lands in the already-listening buffer — no fixed capture window, and
+    #    no command is needed *during* the session (which the wifi/AT link can't do).
+    dut.power_off(pins.efuse)
+    dut.power_on(pins.efuse, delay=1.5)
+    with dut.open_uart(rx=pins.uart_rx, tx=pins.uart_tx) as uart:
+        # selftest.c prints "APP_OK" once it has booted and initialised.
+        assert uart.read_until(r"APP_OK", timeout=12), \
+            f"selftest did not report APP_OK; captured:\n{uart.text}"
 
-    # 3) selftest.c prints "APP_OK" once it has booted and initialised — the self-test marker.
-    assert capture.match(r"APP_OK"), f"selftest did not report APP_OK; captured:\n{capture.text}"
+        # 3) Interactive check on the same live stream: drive the DUT's console and
+        #    read its reply (all on the open UART link — something a one-shot
+        #    capture cannot do).
+        uart.drain()
+        uart.write("ping\r\n")
+        assert uart.expect("pong", timeout=3), \
+            f"DUT console did not answer ping; captured:\n{uart.text}"
