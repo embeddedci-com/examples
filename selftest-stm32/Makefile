@@ -46,7 +46,7 @@ LDFLAGS := \
 STARTUP := startup_stm32f446xx.s
 
 SRCS := \
-	main.c \
+	selftest.c \
 	syscalls.c \
 	sysmem.c \
 	system_stm32f4xx.c \
@@ -62,7 +62,7 @@ SRCS := \
 	$(HAL_DIR)/Src/stm32f4xx_hal_uart.c
 
 OBJS := \
-	$(BUILD_DIR)/main.o \
+	$(BUILD_DIR)/selftest.o \
 	$(BUILD_DIR)/syscalls.o \
 	$(BUILD_DIR)/sysmem.o \
 	$(BUILD_DIR)/system_stm32f4xx.o \
@@ -82,7 +82,7 @@ all: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).bin $(BUILD_DIR)/$(TARGET
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/main.o: main.c | $(BUILD_DIR)
+$(BUILD_DIR)/selftest.o: selftest.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/syscalls.o: syscalls.c | $(BUILD_DIR)

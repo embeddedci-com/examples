@@ -1,0 +1,11 @@
+# Python (pytest test harnesses)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Editor scratch
+*.swp
+*~
+.DS_Store

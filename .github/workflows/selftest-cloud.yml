@@ -1,0 +1,59 @@
+name: Selftest (cloud HIL)
+
+# Runs the STM32 selftest on the physical device registered as "benchpod-v1.0.0",
+# driven over embeddedci.com from pytest (no BenchPod on the runner). Auth is the
+# job's GitHub OIDC token — no secret needed (the repo must be trusted in the
+# EmbeddedCI web app under BenchPod → GitHub Actions, allowed to drive the device).
+#
+# Triggers only when the firmware (selftest.c) or this workflow changes.
+on:
+  push:
+    paths:
+      - "selftest-stm32/selftest.c"
+      - ".github/workflows/selftest-cloud.yml"
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write   # REQUIRED: lets the job mint a GitHub OIDC token for embeddedci
+  contents: read
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Build the firmware (arm-none-eabi + STM32CubeF4 HAL) ---
+      - name: Install ARM toolchain
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: "13.2.Rel1"   # official Arm GNU toolchain, pinned + cached across runs
+
+      - name: Install OpenOCD
+        # What the SDK shells out to for flashing — it bridges remote_bitbang through the cloud
+        # tunnel to the device. Small; only needed at flash/test time.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends openocd
+
+      - name: Fetch STM32CubeF4 HAL (sparse — only the Drivers/ paths the Makefile uses)
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/STMicroelectronics/STM32CubeF4 selftest-stm32/STM32CubeF4
+          git -C selftest-stm32/STM32CubeF4 sparse-checkout set \
+            Drivers/STM32F4xx_HAL_Driver Drivers/CMSIS/Include Drivers/CMSIS/Device/ST/STM32F4xx
+
+      - name: Build selftest.elf
+        run: make -C selftest-stm32 CUBE_F4="$GITHUB_WORKSPACE/selftest-stm32/STM32CubeF4"
+
+      # --- Run it on benchpod-v1.0.0 over the cloud ---
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the embeddedci SDK (cloud extra)
+        run: pip install "embeddedci[cloud]"
+
+      - name: Self-test on benchpod-v1.0.0 (cloud)
+        run: |
+          pytest selftest-stm32/tests -v \
+            --benchpod-connection=embeddedci:benchpod-v1.0.0 \
+            --benchpod-firmware="$GITHUB_WORKSPACE/selftest-stm32/build/selftest.elf"
