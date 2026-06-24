@@ -36,14 +36,22 @@ def test_selftest_boots_over_cloud(dut, pins, firmware):
     #    OpenOCD's CMSIS-DAP backend through the pod; ``target=`` is a normal OpenOCD
     #    config, so swapping it (stm32f4x.cfg, stm32h7x.cfg, nrf52.cfg, ...) is all it
     #    takes to support a different board.
+    # check=False lets us inspect result.ok and fall back to a plain (no-NRST)
+    # connect if connect-under-reset doesn't answer: selftest.c doesn't remap the
+    # SWD pins, so NRST isn't required, and a mis-wired/floating NRST would
+    # otherwise block the read. (Same flow as examples/selftest-stm32/e2e_local.py,
+    # which passes on the bench.)
     result = dut.flash(
-        file=firmware,
-        target="target/stm32f4x.cfg",
-        swclk=pins.swclk,
-        swdio=pins.swdio,
-        nreset=pins.nreset,
-        target_power=pins.efuse,
+        file=firmware, target="target/stm32f4x.cfg",
+        swclk=pins.swclk, swdio=pins.swdio, nreset=pins.nreset,
+        target_power=pins.efuse, check=False,
     )
+    if not result.ok and result.target_unreachable and pins.nreset:
+        result = dut.flash(
+            file=firmware, target="target/stm32f4x.cfg",
+            swclk=pins.swclk, swdio=pins.swdio, nreset=None,
+            target_power=pins.efuse, check=False,
+        )
     assert result.ok, f"flash failed; openocd output:\n{result.stdout}"
 
     # 2) Read the boot banner with an event-based UART session. Schedule a pod-side
@@ -59,8 +67,10 @@ def test_selftest_boots_over_cloud(dut, pins, firmware):
 
         # 3) Interactive check on the same live stream: drive the DUT's console and
         #    read its reply (all on the open UART link — something a one-shot
-        #    capture cannot do).
+        #    capture cannot do). The pod sends "ping\r\n" back-to-back at line rate;
+        #    selftest.c's RX is interrupt-driven so it takes the whole burst without
+        #    overrunning (a polled RX would drop all but the first byte).
         uart.drain()
         uart.write("ping\r\n")
-        assert uart.expect("pong", timeout=3), \
+        assert uart.expect("pong", timeout=4), \
             f"DUT console did not answer ping; captured:\n{uart.text}"

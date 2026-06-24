@@ -10,6 +10,7 @@ on:
   push:
     paths:
       - "selftest-stm32/selftest.c"
+      - "selftest-stm32/tests/**"
       - ".github/workflows/selftest-cloud.yml"
   workflow_dispatch: {}
 

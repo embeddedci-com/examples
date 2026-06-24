@@ -29,6 +29,16 @@ static uint8_t rx_byte;
 static volatile uint32_t rx_byte_count = 0;
 static volatile uint32_t command_count = 0;
 
+/* Interrupt-driven RX ring buffer.  USART1 has a single RDR (no RX FIFO) and the
+ * main loop sleeps in __WFI between SysTicks, so polling RDR drops bytes on a
+ * back-to-back burst — a "ping\r\n" sent at line rate (~87 us/byte @115200)
+ * overruns RDR and the loop sees only "p".  An RX interrupt drains RDR the moment
+ * each byte lands into this ring; the main loop consumes it at its own pace. */
+#define RX_RING_SIZE 256u
+static volatile uint8_t  rx_ring[RX_RING_SIZE];
+static volatile uint16_t rx_ring_head = 0;   /* written by the ISR  */
+static volatile uint16_t rx_ring_tail = 0;   /* read by the main loop */
+
 /* ========================= */
 
 void SystemClock_Config(void);
@@ -112,14 +122,32 @@ static void print_prompt(void)
     printf("> ");
 }
 
+/* RX interrupt: drain RDR (and clear a possible overrun) into the ring the moment
+ * bytes arrive, so a line-rate burst is never lost while the main loop is asleep.
+ * Reading DR clears RXNE; reading SR then DR clears ORE. */
+void USART1_IRQHandler(void)
+{
+    while ((USART1->SR & (USART_SR_RXNE | USART_SR_ORE)) != 0U)
+    {
+        uint8_t byte = (uint8_t)(USART1->DR & 0xFFU);
+        uint16_t next = (uint16_t)((rx_ring_head + 1U) % RX_RING_SIZE);
+        if (next != rx_ring_tail)      /* drop on full rather than clobber unread */
+        {
+            rx_ring[rx_ring_head] = byte;
+            rx_ring_head = next;
+        }
+    }
+}
+
 static int usart1_read_byte_nonblocking(uint8_t *byte)
 {
-    if ((USART1->SR & USART_SR_RXNE) != 0U)
+    if (rx_ring_tail == rx_ring_head)
     {
-        *byte = (uint8_t)(USART1->DR & 0xFFU);
-        return 1;
+        return 0;                      /* ring empty */
     }
-    return 0;
+    *byte = rx_ring[rx_ring_tail];
+    rx_ring_tail = (uint16_t)((rx_ring_tail + 1U) % RX_RING_SIZE);
+    return 1;
 }
 
 static void uart_process_rx_byte(uint8_t byte)
@@ -260,8 +288,12 @@ static void USART1_Init(void)
     /* BRR = 16,000,000 / 115,200 = 138.888... -> 0x008B (mantissa 8, fraction 11) */
     USART1->BRR = 0x008BU;
 
-    USART1->CR1 |= USART_CR1_TE | USART_CR1_RE;
+    USART1->CR1 |= USART_CR1_TE | USART_CR1_RE | USART_CR1_RXNEIE;
     USART1->CR1 |= USART_CR1_UE;
+
+    /* Enable the USART1 interrupt so RDR is drained as each byte lands (above). */
+    NVIC_SetPriority(USART1_IRQn, 1);
+    NVIC_EnableIRQ(USART1_IRQn);
 }
 
 void SysTick_Handler(void)
