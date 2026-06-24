@@ -1,9 +1,10 @@
 name: EmbeddedCI
 on:
-  push:
-    paths:
-      - "scenario-sensors-stm32/**"
-      - ".github/workflows/embeddedci.yml"
+  workflow_dispatch:
+#  push:
+#    paths:
+#      - "scenario-sensors-stm32/**"
+#      - ".github/workflows/embeddedci.yml"
 
 jobs:
   submit:
