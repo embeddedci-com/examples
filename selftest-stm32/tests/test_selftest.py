@@ -7,30 +7,50 @@ embeddedci.com** — there is no BenchPod on the runner. The connection
 server bridges a tunnel to the physical BenchPod, and we flash + UART-verify the firmware
 over the cloud exactly as we would locally.
 
-Wiring (BenchPod logic-analyzer channels → DUT) — these come from the plugin's pin-map
-options and default sensibly; override per your bench with ``--benchpod-swclk`` /
-``--benchpod-swdio`` / ``--benchpod-uart-rx`` / ``--benchpod-uart-tx`` / ``--benchpod-efuse``:
+Wiring (BenchPod logic-analyzer channels → DUT). The pod has no dedicated SWD/UART
+pins — it exposes 12 generic LA channels (``pins.pin_1`` .. ``pins.pin_12``) and any
+DUT signal can be on any of them. The ``wiring`` fixture below is THIS bench's map;
+edit it to match how your board is wired.
 
-    SWCLK → pins.swclk      SWDIO → pins.swdio
-    UART:  the pod samples the DUT's TX on pins.uart_rx and drives the DUT's RX on pins.uart_tx
-    Target power: eFuse pins.efuse
+    SWCLK → LA11        SWDIO → LA12        NRESET → LA3
+    UART:  the pod samples the DUT's TX on LA5 and drives the DUT's RX on LA4
+    Target power: internal-5V eFuse (``pins.efuse``, set with ``--benchpod-efuse``)
 """
+
+from types import SimpleNamespace
 
 import pytest
 
 
 @pytest.fixture
-def dut(benchpod, pins):
+def wiring(pins):
+    """How THIS bench is physically wired: DUT signal → BenchPod LA channel.
+
+    These are bench-specific; any signal can be on any of the 12 LA channels.
+    (Pull-ups, if you needed them, exist only on LA1-8 — see ``pins.has_pullup``.)
+    """
+    return SimpleNamespace(
+        swclk=pins.pin_11,    # SWD clock
+        swdio=pins.pin_12,    # SWD data
+        nreset=pins.pin_3,    # target NRST (None to skip connect-under-reset)
+        uart_rx=pins.pin_5,   # pod samples the DUT's TX here
+        uart_tx=pins.pin_4,   # pod drives the DUT's RX here
+        efuse=pins.efuse,     # target-power rail
+    )
+
+
+@pytest.fixture
+def dut(benchpod, wiring):
     """The BenchPod for the test, with a guaranteed clean shutdown: the target-power eFuse is
     switched OFF at teardown whether the test passes, fails, or errors — so we never leave the
     DUT powered on. (Fixture teardown also lets pytest report a power-off problem separately
     instead of masking the real test failure.)"""
     yield benchpod
-    benchpod.power_off(pins.efuse)
+    benchpod.power_off(wiring.efuse)
 
 
 @pytest.mark.hardware
-def test_selftest_boots_over_cloud(dut, pins, firmware):
+def test_selftest_boots_over_cloud(dut, wiring, firmware):
     """Flash selftest.elf to benchpod-v1.0.0 over the cloud and assert it boots cleanly."""
     # 1) Flash the freshly built firmware to the DUT over the cloud. flash() drives
     #    OpenOCD's CMSIS-DAP backend through the pod; ``target=`` is a normal OpenOCD
@@ -43,14 +63,14 @@ def test_selftest_boots_over_cloud(dut, pins, firmware):
     # which passes on the bench.)
     result = dut.flash(
         file=firmware, target="target/stm32f4x.cfg",
-        swclk=pins.swclk, swdio=pins.swdio, nreset=pins.nreset,
-        target_power=pins.efuse, check=False,
+        swclk=wiring.swclk, swdio=wiring.swdio, nreset=wiring.nreset,
+        target_power=wiring.efuse, check=False,
     )
-    if not result.ok and result.target_unreachable and pins.nreset:
+    if not result.ok and result.target_unreachable and wiring.nreset:
         result = dut.flash(
             file=firmware, target="target/stm32f4x.cfg",
-            swclk=pins.swclk, swdio=pins.swdio, nreset=None,
-            target_power=pins.efuse, check=False,
+            swclk=wiring.swclk, swdio=wiring.swdio, nreset=None,
+            target_power=wiring.efuse, check=False,
         )
     assert result.ok, f"flash failed; openocd output:\n{result.stdout}"
 
@@ -58,9 +78,9 @@ def test_selftest_boots_over_cloud(dut, pins, firmware):
     #    power-on (returns immediately), then open the session BEFORE it fires so the
     #    banner lands in the already-listening buffer — no fixed capture window, and
     #    no command is needed *during* the session (which the wifi/AT link can't do).
-    dut.power_off(pins.efuse)
-    dut.power_on(pins.efuse, delay=1.5)
-    with dut.open_uart(rx=pins.uart_rx, tx=pins.uart_tx) as uart:
+    dut.power_off(wiring.efuse)
+    dut.power_on(wiring.efuse, delay=1.5)
+    with dut.open_uart(rx=wiring.uart_rx, tx=wiring.uart_tx) as uart:
         # selftest.c prints "APP_OK" once it has booted and initialised.
         assert uart.read_until(r"APP_OK", timeout=12), \
             f"selftest did not report APP_OK; captured:\n{uart.text}"

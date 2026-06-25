@@ -40,5 +40,7 @@ pytest selftest-stm32/tests -v \
   --benchpod-firmware=selftest-stm32/build/selftest.elf
 ```
 
-Pin wiring (BenchPod LA channels → DUT) is set with `--benchpod-swclk/-swdio/-uart-rx/-uart-tx/-efuse`;
-see the defaults in [`tests/test_selftest.py`](tests/test_selftest.py).
+The pod exposes 12 generic logic-analyzer channels (`pins.pin_1`…`pins.pin_12`); any DUT
+signal can be on any channel. This bench's wiring (SWCLK→LA11, SWDIO→LA12, NRESET→LA3,
+UART rx/tx→LA5/LA4) lives in the `wiring` fixture in [`tests/test_selftest.py`](tests/test_selftest.py) —
+edit it to match your board. The target-power rail is set with `--benchpod-efuse` (1=internal 5V).
