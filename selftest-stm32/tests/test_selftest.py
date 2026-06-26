@@ -39,6 +39,42 @@ def _firmware_artifacts(firmware: str):
     return paths
 
 
+# Flashing over the cloud goes OpenOCD → pod → SWD; a flaky link can drop a transaction. The SDK's
+# flash() already retries transient *connect* failures, but a drop *mid-write* ("Failed to write
+# memory") is treated as a hard error, so we retry the whole flash a few times here.
+FLASH_ATTEMPTS = 3
+
+
+def _flash_firmware(dut, wiring, firmware):
+    """Flash with a connect-under-reset → plain-connect fallback, retried up to FLASH_ATTEMPTS.
+
+    Returns the final FlashResult (inspect ``.ok`` / ``.stderr``). check=False so we can fall back
+    to a plain (no-NRST) connect when connect-under-reset doesn't answer: selftest.c doesn't remap
+    the SWD pins, so NRST isn't required, and a mis-wired/floating NRST would otherwise block it.
+    """
+    result = None
+    for attempt in range(FLASH_ATTEMPTS):
+        if attempt > 0:
+            # Re-flash from a cold boot: a prior failed flash can leave a half-written/sleeping
+            # image running that blocks re-attaching, which is why a manual reset "fixes" it. A
+            # power-cycle is the software equivalent (flash() powers the target back on).
+            dut.power_off(wiring.efuse)
+        result = dut.flash(
+            file=firmware, target=TARGET_CFG,
+            swclk=wiring.swclk, swdio=wiring.swdio, nreset=wiring.nreset,
+            target_power=wiring.efuse, check=False,
+        )
+        if not result.ok and result.target_unreachable and wiring.nreset:
+            result = dut.flash(
+                file=firmware, target=TARGET_CFG,
+                swclk=wiring.swclk, swdio=wiring.swdio, nreset=None,
+                target_power=wiring.efuse, check=False,
+            )
+        if result.ok:
+            break
+    return result
+
+
 @pytest.fixture
 def wiring(pins):
     """How THIS bench is physically wired: DUT signal → BenchPod LA channel.
@@ -86,24 +122,10 @@ def test_selftest_boots_over_cloud(dut, wiring, firmware, build_report):
     # 1) Flash the freshly built firmware to the DUT over the cloud. flash() drives
     #    OpenOCD's CMSIS-DAP backend through the pod; ``target=`` is a normal OpenOCD
     #    config, so swapping it (stm32f4x.cfg, stm32h7x.cfg, nrf52.cfg, ...) is all it
-    #    takes to support a different board.
-    # check=False lets us inspect result.ok and fall back to a plain (no-NRST)
-    # connect if connect-under-reset doesn't answer: selftest.c doesn't remap the
-    # SWD pins, so NRST isn't required, and a mis-wired/floating NRST would
-    # otherwise block the read. (Same flow as examples/selftest-stm32/e2e_local.py,
-    # which passes on the bench.)
-    result = dut.flash(
-        file=firmware, target=TARGET_CFG,
-        swclk=wiring.swclk, swdio=wiring.swdio, nreset=wiring.nreset,
-        target_power=wiring.efuse, check=False,
-    )
-    if not result.ok and result.target_unreachable and wiring.nreset:
-        result = dut.flash(
-            file=firmware, target=TARGET_CFG,
-            swclk=wiring.swclk, swdio=wiring.swdio, nreset=None,
-            target_power=wiring.efuse, check=False,
-        )
-    assert result.ok, f"flash failed; openocd output:\n{result.stdout}"
+    #    takes to support a different board. Retried a few times — see _flash_firmware.
+    result = _flash_firmware(dut, wiring, firmware)
+    # OpenOCD writes its log to stderr, so surface stderr (not stdout) on failure.
+    assert result.ok, f"flash failed after {FLASH_ATTEMPTS} attempts; openocd output:\n{result.stderr}"
 
     # 2) Read the boot banner with an event-based UART session. Schedule a pod-side
     #    power-on (returns immediately), then open the session BEFORE it fires so the
