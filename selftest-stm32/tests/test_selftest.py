@@ -17,9 +17,26 @@ edit it to match how your board is wired.
     Target power: internal-5V eFuse (``pins.efuse``, set with ``--benchpod-efuse``)
 """
 
+import os
 from types import SimpleNamespace
 
 import pytest
+
+# OpenOCD target config for the DUT (an STM32F4). Used both to flash and as the flash default
+# recorded for the web UI, so they can't drift apart.
+TARGET_CFG = "target/stm32f4x.cfg"
+
+
+def _firmware_artifacts(firmware: str):
+    """The firmware plus its sibling build outputs (``.elf`` / ``.bin`` / ``.hex``) that exist,
+    so a reported build carries every format the UI might flash."""
+    stem, _ = os.path.splitext(firmware)
+    paths = [firmware] if os.path.exists(firmware) else []
+    for ext in (".elf", ".bin", ".hex"):
+        sibling = stem + ext
+        if os.path.exists(sibling) and sibling not in paths:
+            paths.append(sibling)
+    return paths
 
 
 @pytest.fixture
@@ -50,8 +67,22 @@ def dut(benchpod, wiring):
 
 
 @pytest.mark.hardware
-def test_selftest_boots_over_cloud(dut, wiring, firmware):
-    """Flash selftest.elf to benchpod-v1.0.0 over the cloud and assert it boots cleanly."""
+def test_selftest_boots_over_cloud(dut, wiring, firmware, build_report):
+    """Flash selftest.elf to benchpod-v1.0.0 over the cloud and assert it boots cleanly.
+
+    The ``build_report`` fixture is the opt-in that records this run as a GitHub-sourced build on
+    embeddedci.com (uploading the firmware and capturing pass/fail) — but only inside GitHub Actions
+    with an OIDC token. Locally it's a no-op, so this test runs the same with or without it.
+    """
+    # 0) Report this build to embeddedci.com (no-op outside GitHub Actions): upload the firmware
+    #    artifacts and record the flash wiring so the web UI's flash modal can pre-fill them. The
+    #    pytest pass/fail is captured automatically at teardown.
+    build_report.record_wiring(
+        target=TARGET_CFG, swclk=wiring.swclk, swdio=wiring.swdio,
+        nreset=wiring.nreset, efuse=wiring.efuse,
+    )
+    build_report.upload_artifacts(_firmware_artifacts(firmware))
+
     # 1) Flash the freshly built firmware to the DUT over the cloud. flash() drives
     #    OpenOCD's CMSIS-DAP backend through the pod; ``target=`` is a normal OpenOCD
     #    config, so swapping it (stm32f4x.cfg, stm32h7x.cfg, nrf52.cfg, ...) is all it
@@ -62,13 +93,13 @@ def test_selftest_boots_over_cloud(dut, wiring, firmware):
     # otherwise block the read. (Same flow as examples/selftest-stm32/e2e_local.py,
     # which passes on the bench.)
     result = dut.flash(
-        file=firmware, target="target/stm32f4x.cfg",
+        file=firmware, target=TARGET_CFG,
         swclk=wiring.swclk, swdio=wiring.swdio, nreset=wiring.nreset,
         target_power=wiring.efuse, check=False,
     )
     if not result.ok and result.target_unreachable and wiring.nreset:
         result = dut.flash(
-            file=firmware, target="target/stm32f4x.cfg",
+            file=firmware, target=TARGET_CFG,
             swclk=wiring.swclk, swdio=wiring.swdio, nreset=None,
             target_power=wiring.efuse, check=False,
         )

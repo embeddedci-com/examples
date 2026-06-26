@@ -1,0 +1,72 @@
+name: Scenario sensors (cloud HIL)
+
+# Runs the scenario-sensors-stm32 firmware on a physical BenchPod, driven over embeddedci.com from
+# pytest (no BenchPod on the runner). Auth is the job's GitHub OIDC token — no secret needed (the
+# repo must be trusted in the EmbeddedCI web app under BenchPod → GitHub Actions, allowed to drive
+# the device). The run is also recorded on embeddedci.com as a GitHub-sourced build (the test
+# requests the `build_report` fixture): firmware is uploaded and the pass/fail is captured.
+#
+# This is the EXTERNAL (github) build path for this firmware; the internal embeddedci.yaml pipeline
+# is the separate internal path for the same code.
+on:
+  push:
+    paths:
+      - "scenario-sensors-stm32/main.c"
+      - "scenario-sensors-stm32/tests/**"
+      - ".github/workflows/scenario-cloud.yml"
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write   # REQUIRED: lets the job mint a GitHub OIDC token for embeddedci
+  contents: read
+
+jobs:
+  scenario:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # --- Build the firmware (arm-none-eabi + STM32CubeF4 HAL) ---
+      - name: Install ARM toolchain
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: "13.2.Rel1"
+
+      - name: Install xPack OpenOCD
+        # SWD over remote_bitbang/CMSIS-DAP needs OpenOCD master (post-0.12.0); see selftest-cloud.yml.
+        run: |
+          V=0.12.0-7
+          curl -fsSL "https://github.com/xpack-dev-tools/openocd-xpack/releases/download/v$V/xpack-openocd-$V-linux-x64.tar.gz" \
+            | sudo tar xz -C /opt
+          echo "/opt/xpack-openocd-$V/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch STM32CubeF4 HAL
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/STMicroelectronics/STM32CubeF4 scenario-sensors-stm32/STM32CubeF4
+          cd scenario-sensors-stm32/STM32CubeF4
+          git sparse-checkout set Drivers/CMSIS
+          git submodule update --init --depth 1 \
+            Drivers/STM32F4xx_HAL_Driver Drivers/CMSIS/Device/ST/STM32F4xx
+
+      - name: Build scenario-sensors.elf
+        run: make -C scenario-sensors-stm32 CUBE_F4="$GITHUB_WORKSPACE/scenario-sensors-stm32/STM32CubeF4"
+
+      # --- Run it on the BenchPod over the cloud ---
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest + the embeddedci SDK (cloud extra)
+        run: |
+          pip install pytest \
+            "embeddedci[cloud] @ git+https://github.com/embeddedci-com/embeddedci-python.git@main#subdirectory=packages/embeddedci"
+
+      - name: Scenario test on the BenchPod (cloud)
+        # Point --benchpod-connection at the device wired to this board (here we reuse
+        # benchpod-v1.0.0; change it to your scenario bench's device name).
+        run: |
+          pytest scenario-sensors-stm32/tests -v \
+            --benchpod-connection=embeddedci:benchpod-v1.0.0 \
+            --benchpod-firmware="$GITHUB_WORKSPACE/scenario-sensors-stm32/build/scenario-sensors.elf" \
+            --benchpod-build-target=stm32f4

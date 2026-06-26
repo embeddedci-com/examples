@@ -1,0 +1,104 @@
+"""Cloud hardware-in-the-loop test for the drone-sensors scenario firmware.
+
+Companion to ``selftest-stm32`` but for the richer ``scenario-sensors-stm32`` firmware (BMP280 +
+VL53L0X + rotor control, ``main.c``). It runs in GitHub Actions (see
+``.github/workflows/scenario-cloud.yml``): the workflow builds ``build/scenario-sensors.elf``, then
+pytest drives a physical BenchPod **through embeddedci.com** to flash it and verify it boots and its
+console answers — exactly as you would locally.
+
+This file is the *external* (GitHub-sourced) build path. The same project also has an internal
+``embeddedci.yaml`` pipeline; the two are deliberately separate ways to build the same firmware, and
+both surface on the Builds page (tagged "embeddedci" vs "github").
+
+Wiring (BenchPod logic-analyzer channels → DUT) is THIS bench's map — edit it to match your board.
+The pod has no dedicated SWD/UART pins; any DUT signal can be on any of the 12 LA channels.
+
+    SWCLK → LA11   SWDIO → LA12   NRESET → LA3
+    UART (USART1): pod samples the DUT's TX on LA5, drives the DUT's RX on LA4
+    Target power: internal-5V eFuse (``pins.efuse``, set with ``--benchpod-efuse``)
+"""
+
+import os
+from types import SimpleNamespace
+
+import pytest
+
+# OpenOCD target config for the DUT (STM32F446, an STM32F4). Used to flash and recorded as the
+# flash default for the web UI, so the two can't drift apart.
+TARGET_CFG = "target/stm32f4x.cfg"
+
+
+def _firmware_artifacts(firmware: str):
+    """The firmware plus its sibling build outputs (``.elf`` / ``.bin`` / ``.hex``) that exist,
+    so a reported build carries every format the UI might flash."""
+    stem, _ = os.path.splitext(firmware)
+    paths = [firmware] if os.path.exists(firmware) else []
+    for ext in (".elf", ".bin", ".hex"):
+        sibling = stem + ext
+        if os.path.exists(sibling) and sibling not in paths:
+            paths.append(sibling)
+    return paths
+
+
+@pytest.fixture
+def wiring(pins):
+    """How THIS bench is physically wired: DUT signal → BenchPod LA channel (edit for your board)."""
+    return SimpleNamespace(
+        swclk=pins.pin_11,    # SWD clock
+        swdio=pins.pin_12,    # SWD data
+        nreset=pins.pin_3,    # target NRST (None to skip connect-under-reset)
+        uart_rx=pins.pin_5,   # pod samples the DUT's TX (USART1 TX) here
+        uart_tx=pins.pin_4,   # pod drives the DUT's RX (USART1 RX) here
+        efuse=pins.efuse,     # target-power rail
+    )
+
+
+@pytest.fixture
+def dut(benchpod, wiring):
+    """The BenchPod for the test, with target power guaranteed OFF at teardown."""
+    yield benchpod
+    benchpod.power_off(wiring.efuse)
+
+
+@pytest.mark.hardware
+def test_scenario_boots_over_cloud(dut, wiring, firmware, build_report):
+    """Flash the scenario firmware over the cloud, assert it boots and its console answers.
+
+    ``build_report`` opts this run into being recorded as a GitHub-sourced build on embeddedci.com
+    (firmware upload + pass/fail), but only inside GitHub Actions with an OIDC token; locally it is a
+    no-op so this test runs unchanged.
+    """
+    # 0) Report this build (no-op outside GitHub Actions): upload firmware + record flash wiring so
+    #    the web UI flash modal pre-fills these defaults. pytest pass/fail is captured at teardown.
+    build_report.record_wiring(
+        target=TARGET_CFG, swclk=wiring.swclk, swdio=wiring.swdio,
+        nreset=wiring.nreset, efuse=wiring.efuse,
+    )
+    build_report.upload_artifacts(_firmware_artifacts(firmware))
+
+    # 1) Flash, with the same connect-under-reset → plain-connect fallback as the selftest example.
+    result = dut.flash(
+        file=firmware, target=TARGET_CFG,
+        swclk=wiring.swclk, swdio=wiring.swdio, nreset=wiring.nreset,
+        target_power=wiring.efuse, check=False,
+    )
+    if not result.ok and result.target_unreachable and wiring.nreset:
+        result = dut.flash(
+            file=firmware, target=TARGET_CFG,
+            swclk=wiring.swclk, swdio=wiring.swdio, nreset=None,
+            target_power=wiring.efuse, check=False,
+        )
+    assert result.ok, f"flash failed; openocd output:\n{result.stdout}"
+
+    # 2) Power-cycle and read the boot banner; main.c prints "APP_OK" once initialised.
+    dut.power_off(wiring.efuse)
+    dut.power_on(wiring.efuse, delay=1.5)
+    with dut.open_uart(rx=wiring.uart_rx, tx=wiring.uart_tx) as uart:
+        assert uart.read_until(r"APP_OK", timeout=12), \
+            f"scenario firmware did not report APP_OK; captured:\n{uart.text}"
+
+        # 3) Interactive console check on the live stream: "status" prints a status block.
+        uart.drain()
+        uart.write("status\r\n")
+        assert uart.expect("status:", timeout=4), \
+            f"DUT console did not answer status; captured:\n{uart.text}"

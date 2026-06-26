@@ -71,7 +71,13 @@ jobs:
             "embeddedci[cloud] @ git+https://github.com/embeddedci-com/embeddedci-python.git@main#subdirectory=packages/embeddedci"
 
       - name: Self-test on benchpod-v1.0.0 (cloud)
+        # The test requests the `build_report` fixture, so this run is also recorded on
+        # embeddedci.com as a GitHub-sourced build: the firmware (elf/bin/hex) is uploaded and the
+        # pytest pass/fail is captured, reusing the same OIDC token (id-token: write above). The
+        # uploaded firmware can then be re-flashed from the BenchPod page in the web UI.
+        # --benchpod-build-target labels the build's platform for the flash modal.
         run: |
           pytest selftest-stm32/tests -v \
             --benchpod-connection=embeddedci:benchpod-v1.0.0 \
-            --benchpod-firmware="$GITHUB_WORKSPACE/selftest-stm32/build/selftest.elf"
+            --benchpod-firmware="$GITHUB_WORKSPACE/selftest-stm32/build/selftest.elf" \
+            --benchpod-build-target=stm32f4
