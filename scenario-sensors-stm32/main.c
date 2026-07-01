@@ -37,6 +37,13 @@
 #define I2C_ISREADY_TRIALS 3U
 #define I2C_ISREADY_TIMEOUT_MS 10U
 
+/* Boot attach window (ms): main() holds this long before touching any peripheral
+ * so a host flasher that just reset us (NRST, an eFuse power-cycle, or the UART
+ * "reset" command below) can connect SWD and halt during a known-quiet window.
+ * This app never repurposes PA13/PA14, so SWD stays available regardless, but the
+ * window + software reset make attach/flash deterministic on rigs with no NRST. */
+#define FLASH_ATTACH_WINDOW_MS 200U
+
 typedef struct
 {
     uint16_t dig_T1;
@@ -157,6 +164,18 @@ int main(void)
 {
     HAL_Init();
     SystemClock_Config();
+
+    /* Flash-friendliness: keep the debug port (SWD) fully alive even while the
+     * app sleeps in __WFI(), so a host can always attach/halt/flash without a
+     * hardware reset line. */
+    HAL_DBGMCU_EnableDBGSleepMode();
+    HAL_DBGMCU_EnableDBGStopMode();
+    HAL_DBGMCU_EnableDBGStandbyMode();
+
+    /* Give a flasher a clean, quiet window to connect SWD and halt right after a
+     * reset, before we start driving GPIO / I2C / UART. See FLASH_ATTACH_WINDOW_MS. */
+    HAL_Delay(FLASH_ATTACH_WINDOW_MS);
+
     MX_GPIO_Init();
     USART1_Init();
     (void)setvbuf(stdout, NULL, _IONBF, 0);
@@ -343,6 +362,15 @@ static void process_command(char *cmd)
         (void)sensor_i2c_deinit();
         printf("I2C1 deinitialized; use \"sensor init\", \"i2c scan\", or \"vl53 test\" to run I2C1_Init() again.\r\n");
     }
+    else if (strcmp(cmd, "reset") == 0 || strcmp(cmd, "reboot") == 0)
+    {
+        /* Software reset over UART: lets a host reset the DUT without an NRST wire,
+         * then attach SWD during the boot window (see FLASH_ATTACH_WINDOW_MS). */
+        printf("RESET: rebooting via NVIC_SystemReset()\r\n");
+        (void)fflush(stdout);
+        HAL_Delay(20); /* let the line drain before the core resets */
+        NVIC_SystemReset();
+    }
     else
     {
         printf("unknown: %s\r\n", cmd);
@@ -361,6 +389,7 @@ static void print_help(void)
     printf("  i2c scan      (HAL_I2C_IsDeviceReady 0x08-0x77, highlights 0x29)\r\n");
     printf("  vl53 test     (read VL53L0X model ID reg 0xC0; alias: vl53l0x test)\r\n");
     printf("  sensor deinit (HAL_I2C_DeInit + clear sensor state; re-init via sensor init / i2c scan / vl53 test)\r\n");
+    printf("  reset         (NVIC_SystemReset; software reboot so a host can reset+attach without NRST; alias: reboot)\r\n");
 }
 
 static void print_status(void)
