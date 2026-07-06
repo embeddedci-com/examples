@@ -94,6 +94,24 @@ def dut(benchpod, wiring):
     benchpod.power_off(wiring.efuse)
 
 
+@pytest.mark.artifacts_only
+def test_report_build(firmware, wiring, build_report):
+    """Record the built firmware as a GitHub-sourced build on embeddedci.com — WITHOUT a BenchPod.
+
+    Marked ``artifacts_only`` (not ``hardware``): it needs no device, so it runs on every push (the
+    workflow selects it with ``-m artifacts_only``). It uploads the firmware artifacts and records
+    the default flash wiring, so the freshly built firmware is available to flash from the web UI even
+    when the hardware HIL test below is not run. Outside GitHub Actions (no OIDC token) ``build_report``
+    is an inert no-op, so this still passes locally as a plain "the firmware got built" check.
+    """
+    assert os.path.exists(firmware), f"firmware artifact missing: {firmware}"
+    build_report.record_wiring(
+        target=TARGET_CFG, swclk=wiring.swclk, swdio=wiring.swdio,
+        nreset=wiring.nreset, efuse=wiring.efuse,
+    )
+    build_report.upload_artifacts(_firmware_artifacts(firmware))
+
+
 @pytest.mark.hardware
 def test_scenario_boots_over_cloud(dut, wiring, firmware, build_report):
     """Flash the scenario firmware over the cloud, assert it boots and its console answers.

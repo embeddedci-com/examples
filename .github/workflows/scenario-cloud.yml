@@ -1,30 +1,79 @@
 name: Scenario sensors (cloud HIL)
 
-# Runs the scenario-sensors-stm32 firmware on a physical BenchPod, driven over embeddedci.com from
-# pytest (no BenchPod on the runner). Auth is the job's GitHub OIDC token — no secret needed (the
-# repo must be trusted in the EmbeddedCI web app under BenchPod → GitHub Actions, allowed to drive
-# the device). The run is also recorded on embeddedci.com as a GitHub-sourced build (the test
-# requests the `build_report` fixture): firmware is uploaded and the pass/fail is captured.
+# Builds the scenario-sensors-stm32 firmware and (optionally) runs it on a physical BenchPod, driven
+# over embeddedci.com from pytest (no BenchPod on the runner). Auth is the job's GitHub OIDC token —
+# no secret needed (the repo must be trusted in the EmbeddedCI web app under BenchPod → GitHub
+# Actions, allowed to drive the device).
 #
 # This is the EXTERNAL (github) build path for this firmware; the internal embeddedci.yaml pipeline
 # is the separate internal path for the same code.
 #
-# Manual-only: this workflow drives a physical bench, so it never runs automatically on push. Start
-# it by hand from the Actions tab ("Run workflow") when a BenchPod is available.
+# Two paths, split so the hardware bench is only touched on demand:
+#   * build (always, on every push): compile the firmware and record it as a GitHub-sourced build on
+#     embeddedci.com (artifacts uploaded via the device-free `test_report_build`), so the freshly
+#     built firmware is always available to flash from the web UI.
+#   * hil (manual only): rebuild, then flash + drive the DUT on benchpod-v2.0.0. Runs ONLY on a manual
+#     "Run workflow" (workflow_dispatch), never automatically on push.
 on:
+  push:
+    paths:
+      - "scenario-sensors-stm32/**"
+      - ".github/workflows/scenario-cloud.yml"
   workflow_dispatch: {}
 
 permissions:
-  id-token: write   # REQUIRED: lets the job mint a GitHub OIDC token for embeddedci
+  id-token: write   # REQUIRED: lets the jobs mint a GitHub OIDC token for embeddedci
   contents: read
 
 jobs:
-  scenario:
+  # --- Always: build the firmware and publish it to embeddedci (no hardware) ---
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      # --- Build the firmware (arm-none-eabi + STM32CubeF4 HAL) ---
+      - name: Install ARM toolchain
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: "13.2.Rel1"
+
+      - name: Fetch STM32CubeF4 HAL
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/STMicroelectronics/STM32CubeF4 scenario-sensors-stm32/STM32CubeF4
+          cd scenario-sensors-stm32/STM32CubeF4
+          git sparse-checkout set Drivers/CMSIS
+          git submodule update --init --depth 1 \
+            Drivers/STM32F4xx_HAL_Driver Drivers/CMSIS/Device/ST/STM32F4xx
+
+      - name: Build scenario-sensors.elf
+        run: make -C scenario-sensors-stm32 CUBE_F4="$GITHUB_WORKSPACE/scenario-sensors-stm32/STM32CubeF4"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest + the embeddedci SDK (cloud extra)
+        run: |
+          pip install pytest \
+            "embeddedci[cloud] @ git+https://github.com/embeddedci-com/embeddedci-python.git@main#subdirectory=packages/embeddedci"
+
+      - name: Publish build to embeddedci (no device)
+        # -m artifacts_only selects only the device-free test_report_build, which uploads the firmware
+        # (elf/bin/hex) + flash wiring to embeddedci as a GitHub-sourced build — so it's available to
+        # flash from the web UI. No --benchpod-connection is needed because no device is touched.
+        run: |
+          pytest scenario-sensors-stm32/tests -v -m artifacts_only \
+            --benchpod-firmware="$GITHUB_WORKSPACE/scenario-sensors-stm32/build/scenario-sensors.elf" \
+            --benchpod-build-target=stm32f4
+
+  # --- Manual only: rebuild, then flash + drive the DUT on the physical bench ---
+  hil:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
       - name: Install ARM toolchain
         uses: carlosperate/arm-none-eabi-gcc-action@v1
         with:
@@ -50,7 +99,6 @@ jobs:
       - name: Build scenario-sensors.elf
         run: make -C scenario-sensors-stm32 CUBE_F4="$GITHUB_WORKSPACE/scenario-sensors-stm32/STM32CubeF4"
 
-      # --- Run it on the BenchPod over the cloud ---
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -62,9 +110,10 @@ jobs:
 
       - name: Scenario test on the BenchPod (cloud)
         # Point --benchpod-connection at the device wired to this board (here we use
-        # benchpod-v2.0.0; change it to your scenario bench's device name).
+        # benchpod-v2.0.0; change it to your scenario bench's device name). -m hardware runs only the
+        # HIL test, which also records this run (with the real pass/fail) as a build on embeddedci.
         run: |
-          pytest scenario-sensors-stm32/tests -v \
+          pytest scenario-sensors-stm32/tests -v -m hardware \
             --benchpod-connection=embeddedci:benchpod-v2.0.0 \
             --benchpod-firmware="$GITHUB_WORKSPACE/scenario-sensors-stm32/build/scenario-sensors.elf" \
             --benchpod-build-target=stm32f4
