@@ -127,3 +127,17 @@ def test_scenario_boots_over_cloud(dut, wiring, firmware, build_report):
         uart.write("status\r\n")
         assert uart.expect("status:", timeout=4), \
             f"DUT console did not answer status; captured:\n{uart.text}"
+
+        # 4) Stepper: "rotors step" pulses PC10 (STEP)/PC11 (DIR). Self-contained (no
+        #    external wiring needed) — just assert the move runs to completion.
+        uart.drain()
+        uart.write("rotors step 8\r\n")
+        assert uart.expect("STEP done", timeout=4), \
+            f"DUT did not complete stepper move; captured:\n{uart.text}"
+
+        # 5) PWM health monitor: with nothing driving PA0 (TIM2_CH1, internal pull-down)
+        #    the monitor sees no edges and must flag failure on the first cycle, then stop.
+        uart.drain()
+        uart.write("monitor pwm 1\r\n")
+        assert uart.expect("failure detected", timeout=6), \
+            f"PWM monitor did not report failure on an idle pin; captured:\n{uart.text}"

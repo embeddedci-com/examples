@@ -8,12 +8,10 @@ name: Scenario sensors (cloud HIL)
 #
 # This is the EXTERNAL (github) build path for this firmware; the internal embeddedci.yaml pipeline
 # is the separate internal path for the same code.
+#
+# Manual-only: this workflow drives a physical bench, so it never runs automatically on push. Start
+# it by hand from the Actions tab ("Run workflow") when a BenchPod is available.
 on:
-  push:
-    paths:
-      - "scenario-sensors-stm32/main.c"
-      - "scenario-sensors-stm32/tests/**"
-      - ".github/workflows/scenario-cloud.yml"
   workflow_dispatch: {}
 
 permissions:
@@ -63,10 +61,10 @@ jobs:
             "embeddedci[cloud] @ git+https://github.com/embeddedci-com/embeddedci-python.git@main#subdirectory=packages/embeddedci"
 
       - name: Scenario test on the BenchPod (cloud)
-        # Point --benchpod-connection at the device wired to this board (here we reuse
-        # benchpod-v1.0.0; change it to your scenario bench's device name).
+        # Point --benchpod-connection at the device wired to this board (here we use
+        # benchpod-v2.0.0; change it to your scenario bench's device name).
         run: |
           pytest scenario-sensors-stm32/tests -v \
-            --benchpod-connection=embeddedci:benchpod-v1.0.0 \
+            --benchpod-connection=embeddedci:benchpod-v2.0.0 \
             --benchpod-firmware="$GITHUB_WORKSPACE/scenario-sensors-stm32/build/scenario-sensors.elf" \
             --benchpod-build-target=stm32f4

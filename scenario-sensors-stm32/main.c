@@ -1,7 +1,13 @@
 /*
  * STM32 scenario app:
  * - USART1 interactive menu (line-buffering off for interactive echo)
- * - rotor outputs on PC10/PC11
+ * - rotor / stepper outputs on PC10/PC11
+ *     * "rotors on/off" energises both pins (legacy rotor behaviour)
+ *     * "rotors step <n> [fwd|rev]" drives them as a step/direction stepper
+ *       interface (PC10 = STEP pulse, PC11 = DIR), as for an A4988/DRV8825
+ * - stepper health monitor: "monitor pwm [seconds]" measures a PWM feedback
+ *   signal on PA0 (TIM2_CH1) each cycle and flags "failure detected" if the
+ *   PWM stops (signal lost / motor stalled)
  * - BMP280 on I2C1 (PB8/PB9), auto-detect 0x76/0x77
  * - VL53L0X on same bus (default addr 0x29) for bus validation
  */
@@ -43,6 +49,23 @@
  * This app never repurposes PA13/PA14, so SWD stays available regardless, but the
  * window + software reset make attach/flash deterministic on rigs with no NRST. */
 #define FLASH_ATTACH_WINDOW_MS 200U
+
+/* Stepper (step/direction) on the former rotor pins.  PC10 = STEP (one motor
+ * step per rising edge), PC11 = DIR (level selects rotation direction). This is
+ * the signalling a common stepper driver module (A4988/DRV8825) expects. */
+#define STEP_PORT GPIOC
+#define STEP_PIN GPIO_PIN_10
+#define DIR_PIN GPIO_PIN_11
+#define STEP_HALF_PERIOD_MS 1U /* 1ms high + 1ms low -> ~500 steps/s */
+#define STEP_MAX_COUNT 100000U
+
+/* PWM feedback monitor.  We measure the PWM on PA0 (TIM2_CH1) using the timer's
+ * PWM-input mode: CH1 (rising) captures the period, CH2 (falling) the high time. */
+#define PWM_MON_DEFAULT_SEC 5U
+#define PWM_MON_MIN_SEC 1U
+#define PWM_MON_MAX_SEC 3600U
+#define PWM_MEAS_WINDOW_MS 400U /* no edge within this window = signal lost */
+#define PWM_TIM_HZ 1000000U     /* timer timebase: 1 MHz -> 1 tick = 1 us */
 
 typedef struct
 {
@@ -108,6 +131,7 @@ static bmp280_calibration_t g_calib;
 static vl53l0x_state_t g_vl53;
 static struct VL53L0X g_vl53_dev;
 static uint8_t g_i2c1_hw_inited = 0U;
+static TIM_HandleTypeDef g_pwm_tim;
 
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
@@ -123,6 +147,15 @@ static void process_command(char *cmd);
 static void print_help(void);
 static void print_status(void);
 static void set_rotors(GPIO_PinState state);
+static uint32_t parse_u32_default(const char *s, uint32_t defval);
+static uint32_t rotor_step(uint32_t steps, int reverse);
+static void handle_rotor_step(const char *args);
+static void pwm_input_init(void);
+static void pwm_input_deinit(void);
+static int pwm_measure(uint32_t *freq_hz, uint32_t *duty_pct, uint32_t *period_us);
+static void monitor_pwm_until_key(uint32_t period_sec);
+void HAL_TIM_IC_MspInit(TIM_HandleTypeDef *htim);
+void HAL_TIM_IC_MspDeInit(TIM_HandleTypeDef *htim);
 static void monitor_i2c_until_key(void);
 static void sensor_init_until_key(void);
 static int bmp280_probe_and_init(uint8_t verbose);
@@ -335,9 +368,26 @@ static void process_command(char *cmd)
         set_rotors(GPIO_PIN_RESET);
         printf("ROTORS=OFF (PC10=OFF, PC11=OFF)\r\n");
     }
+    else if (strncmp(cmd, "rotors step", 11) == 0 && (cmd[11] == '\0' || cmd[11] == ' '))
+    {
+        handle_rotor_step(cmd + 11);
+    }
     else if (strcmp(cmd, "monitor i2c") == 0)
     {
         monitor_i2c_until_key();
+    }
+    else if (strncmp(cmd, "monitor pwm", 11) == 0 && (cmd[11] == '\0' || cmd[11] == ' '))
+    {
+        uint32_t sec = parse_u32_default(cmd + 11, PWM_MON_DEFAULT_SEC);
+        if (sec < PWM_MON_MIN_SEC)
+        {
+            sec = PWM_MON_MIN_SEC;
+        }
+        if (sec > PWM_MON_MAX_SEC)
+        {
+            sec = PWM_MON_MAX_SEC;
+        }
+        monitor_pwm_until_key(sec);
     }
     else if (strcmp(cmd, "sensor init") == 0)
     {
@@ -384,7 +434,10 @@ static void print_help(void)
     printf("  status\r\n");
     printf("  rotors on\r\n");
     printf("  rotors off\r\n");
+    printf("  rotors step <n> [fwd|rev]  (PC10=STEP pulses, PC11=DIR; ~500 steps/s; any key aborts)\r\n");
     printf("  monitor i2c   (reads BMP280 every 1s, press any key to stop)\r\n");
+    printf("  monitor pwm [seconds]  (measure PWM on PA0/TIM2_CH1 each cycle; default 5s;\r\n");
+    printf("                          prints 'failure detected' if the PWM is lost; any key stops)\r\n");
     printf("  sensor init   (BMP280 + VL53L0X, 500ms retry; I2C scan once at start; any key stops)\r\n");
     printf("  i2c scan      (HAL_I2C_IsDeviceReady 0x08-0x77, highlights 0x29)\r\n");
     printf("  vl53 test     (read VL53L0X model ID reg 0xC0; alias: vl53l0x test)\r\n");
@@ -407,8 +460,8 @@ static void print_status(void)
     }
 
     printf("status:\r\n");
-    printf("  pc10=%s\r\n", (pc10 == GPIO_PIN_SET) ? "ON" : "OFF");
-    printf("  pc11=%s\r\n", (pc11 == GPIO_PIN_SET) ? "ON" : "OFF");
+    printf("  pc10(STEP)=%s\r\n", (pc10 == GPIO_PIN_SET) ? "HIGH" : "LOW");
+    printf("  pc11(DIR)=%s\r\n", (pc11 == GPIO_PIN_SET) ? "rev" : "fwd");
     printf("  bmp280_detected=%s\r\n", g_sensor.detected ? "yes" : "no");
     if (g_sensor.detected)
     {
@@ -456,6 +509,297 @@ static void print_status(void)
 static void set_rotors(GPIO_PinState state)
 {
     HAL_GPIO_WritePin(GPIOC, GPIO_PIN_10 | GPIO_PIN_11, state);
+}
+
+/* Parse the first unsigned decimal integer in s; return defval if none present. */
+static uint32_t parse_u32_default(const char *s, uint32_t defval)
+{
+    while (*s == ' ')
+    {
+        s++;
+    }
+    if (*s < '0' || *s > '9')
+    {
+        return defval;
+    }
+    uint32_t v = 0U;
+    while (*s >= '0' && *s <= '9')
+    {
+        v = (v * 10U) + (uint32_t)(*s - '0');
+        s++;
+    }
+    return v;
+}
+
+/* Drive PC10 (STEP) with `steps` pulses; PC11 (DIR) selects direction.
+ * Returns the number of steps actually issued (a key press aborts early). */
+static uint32_t rotor_step(uint32_t steps, int reverse)
+{
+    HAL_GPIO_WritePin(STEP_PORT, DIR_PIN, reverse ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_Delay(1); /* let DIR settle before the first STEP edge */
+
+    uint32_t done = 0U;
+    for (uint32_t i = 0U; i < steps; i++)
+    {
+        if (usart1_read_byte_nonblocking(&rx_byte))
+        {
+            break; /* any key aborts a long move */
+        }
+        HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, GPIO_PIN_SET);
+        HAL_Delay(STEP_HALF_PERIOD_MS);
+        HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, GPIO_PIN_RESET);
+        HAL_Delay(STEP_HALF_PERIOD_MS);
+        done++;
+    }
+    return done;
+}
+
+/* "rotors step <n> [fwd|rev]" — args points just past "rotors step". */
+static void handle_rotor_step(const char *args)
+{
+    while (*args == ' ')
+    {
+        args++;
+    }
+    if (*args < '0' || *args > '9')
+    {
+        printf("usage: rotors step <n> [fwd|rev]\r\n");
+        return;
+    }
+
+    uint32_t steps = 0U;
+    const char *p = args;
+    while (*p >= '0' && *p <= '9')
+    {
+        steps = (steps * 10U) + (uint32_t)(*p - '0');
+        if (steps > STEP_MAX_COUNT)
+        {
+            steps = STEP_MAX_COUNT;
+        }
+        p++;
+    }
+
+    int reverse = 0;
+    while (*p == ' ')
+    {
+        p++;
+    }
+    if (*p != '\0')
+    {
+        char c = *p;
+        if (c == 'r' || c == 'R')
+        {
+            reverse = 1;
+        }
+        else if (c == 'f' || c == 'F')
+        {
+            reverse = 0;
+        }
+        else
+        {
+            printf("unknown direction '%s' (use fwd|rev)\r\n", p);
+            return;
+        }
+    }
+
+    if (steps == 0U)
+    {
+        printf("STEP: count=0, nothing to do\r\n");
+        return;
+    }
+
+    printf("STEP: %lu step(s) dir=%s (PC10=STEP, PC11=DIR=%s) at ~%u steps/s\r\n",
+           (unsigned long)steps,
+           reverse ? "rev" : "fwd",
+           reverse ? "HIGH" : "LOW",
+           (unsigned int)(1000U / (2U * STEP_HALF_PERIOD_MS)));
+    uint32_t done = rotor_step(steps, reverse);
+    if (done < steps)
+    {
+        printf("STEP aborted: %lu/%lu step(s) %s\r\n",
+               (unsigned long)done, (unsigned long)steps, reverse ? "rev" : "fwd");
+    }
+    else
+    {
+        printf("STEP done: %lu step(s) %s\r\n", (unsigned long)done, reverse ? "rev" : "fwd");
+    }
+}
+
+/* Bring up TIM2 in PWM-input mode on PA0 (TI1): CH1 (direct, rising) captures the
+ * period, CH2 (indirect, falling) the high time, and TI1 rising resets the counter
+ * (slave reset mode). Timebase is 1 MHz so a capture value is directly in us. */
+static void pwm_input_init(void)
+{
+    uint32_t timclk = HAL_RCC_GetPCLK1Freq();
+    /* APB1 timer clock is doubled unless the APB1 prescaler is 1 (PPRE1 field >= 4). */
+    if (((RCC->CFGR & RCC_CFGR_PPRE1) >> RCC_CFGR_PPRE1_Pos) >= 4U)
+    {
+        timclk *= 2U;
+    }
+    uint32_t prescaler = timclk / PWM_TIM_HZ;
+    if (prescaler == 0U)
+    {
+        prescaler = 1U;
+    }
+
+    g_pwm_tim.Instance = TIM2;
+    g_pwm_tim.Init.Prescaler = prescaler - 1U;
+    g_pwm_tim.Init.CounterMode = TIM_COUNTERMODE_UP;
+    g_pwm_tim.Init.Period = 0xFFFFFFFFU; /* TIM2 is 32-bit; never wraps mid-period */
+    g_pwm_tim.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    g_pwm_tim.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+    if (HAL_TIM_IC_Init(&g_pwm_tim) != HAL_OK)
+    {
+        printf("PWM monitor: TIM2 init failed\r\n");
+        return;
+    }
+
+    TIM_IC_InitTypeDef sIC = {0};
+    sIC.ICPolarity = TIM_ICPOLARITY_RISING;
+    sIC.ICSelection = TIM_ICSELECTION_DIRECTTI; /* CH1 <- TI1: period */
+    sIC.ICPrescaler = TIM_ICPSC_DIV1;
+    sIC.ICFilter = 0U;
+    (void)HAL_TIM_IC_ConfigChannel(&g_pwm_tim, &sIC, TIM_CHANNEL_1);
+
+    sIC.ICPolarity = TIM_ICPOLARITY_FALLING;
+    sIC.ICSelection = TIM_ICSELECTION_INDIRECTTI; /* CH2 <- TI1: high time */
+    (void)HAL_TIM_IC_ConfigChannel(&g_pwm_tim, &sIC, TIM_CHANNEL_2);
+
+    TIM_SlaveConfigTypeDef sSlave = {0};
+    sSlave.SlaveMode = TIM_SLAVEMODE_RESET;
+    sSlave.InputTrigger = TIM_TS_TI1FP1;
+    sSlave.TriggerPolarity = TIM_TRIGGERPOLARITY_RISING;
+    sSlave.TriggerPrescaler = TIM_TRIGGERPRESCALER_DIV1;
+    sSlave.TriggerFilter = 0U;
+    (void)HAL_TIM_SlaveConfigSynchro(&g_pwm_tim, &sSlave);
+
+    (void)HAL_TIM_IC_Start(&g_pwm_tim, TIM_CHANNEL_1);
+    (void)HAL_TIM_IC_Start(&g_pwm_tim, TIM_CHANNEL_2);
+}
+
+static void pwm_input_deinit(void)
+{
+    (void)HAL_TIM_IC_Stop(&g_pwm_tim, TIM_CHANNEL_1);
+    (void)HAL_TIM_IC_Stop(&g_pwm_tim, TIM_CHANNEL_2);
+    (void)HAL_TIM_IC_DeInit(&g_pwm_tim);
+}
+
+/* One PWM measurement. Returns 0 with freq/duty/period filled, or -1 if no full
+ * PWM period is seen within PWM_MEAS_WINDOW_MS (signal lost / stuck / stalled). */
+static int pwm_measure(uint32_t *freq_hz, uint32_t *duty_pct, uint32_t *period_us)
+{
+    uint32_t start = HAL_GetTick();
+
+    /* Discard the first capture (partial period after we start looking), then wait
+     * for a second, full period. Two edges also proves the signal actually toggles. */
+    __HAL_TIM_CLEAR_FLAG(&g_pwm_tim, TIM_FLAG_CC1);
+    while (!__HAL_TIM_GET_FLAG(&g_pwm_tim, TIM_FLAG_CC1))
+    {
+        if ((HAL_GetTick() - start) > PWM_MEAS_WINDOW_MS)
+        {
+            return -1;
+        }
+    }
+    __HAL_TIM_CLEAR_FLAG(&g_pwm_tim, TIM_FLAG_CC1);
+    while (!__HAL_TIM_GET_FLAG(&g_pwm_tim, TIM_FLAG_CC1))
+    {
+        if ((HAL_GetTick() - start) > PWM_MEAS_WINDOW_MS)
+        {
+            return -1;
+        }
+    }
+
+    uint32_t period = HAL_TIM_ReadCapturedValue(&g_pwm_tim, TIM_CHANNEL_1);
+    uint32_t high = HAL_TIM_ReadCapturedValue(&g_pwm_tim, TIM_CHANNEL_2);
+    if (period == 0U)
+    {
+        return -1;
+    }
+    if (high > period)
+    {
+        high = period;
+    }
+    *period_us = period;
+    *freq_hz = PWM_TIM_HZ / period;
+    *duty_pct = (high * 100U) / period;
+    return 0;
+}
+
+static void monitor_pwm_until_key(uint32_t period_sec)
+{
+    uint32_t period_ms = period_sec * 1000U;
+
+    pwm_input_init();
+    printf("monitoring PWM on PA0 (TIM2_CH1) every %lu s (press any key to stop)\r\n",
+           (unsigned long)period_sec);
+    printf("failure = no PWM edges within %u ms (signal lost / motor stalled)\r\n",
+           (unsigned int)PWM_MEAS_WINDOW_MS);
+
+    uint32_t next_ms = HAL_GetTick();
+    uint32_t cycle = 0U;
+    while (1)
+    {
+        if (usart1_read_byte_nonblocking(&rx_byte))
+        {
+            printf("\r\nPWM monitor stopped\r\n");
+            break;
+        }
+
+        uint32_t now = HAL_GetTick();
+        if ((int32_t)(now - next_ms) >= 0)
+        {
+            cycle++;
+            uint32_t freq = 0U;
+            uint32_t duty = 0U;
+            uint32_t per = 0U;
+            if (pwm_measure(&freq, &duty, &per) == 0)
+            {
+                printf("cycle=%lu tick=%lu ms PWM ok: freq=%lu Hz duty=%lu%% period=%lu us\r\n",
+                       (unsigned long)cycle,
+                       (unsigned long)now,
+                       (unsigned long)freq,
+                       (unsigned long)duty,
+                       (unsigned long)per);
+            }
+            else
+            {
+                printf("cycle=%lu tick=%lu ms failure detected: no PWM on PA0 (signal lost)\r\n",
+                       (unsigned long)cycle,
+                       (unsigned long)now);
+                break; /* stop monitoring on failure */
+            }
+            next_ms += period_ms;
+        }
+    }
+    pwm_input_deinit();
+}
+
+void HAL_TIM_IC_MspInit(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM2)
+    {
+        __HAL_RCC_GPIOA_CLK_ENABLE();
+        __HAL_RCC_TIM2_CLK_ENABLE();
+
+        GPIO_InitTypeDef GPIO_InitStruct = {0};
+        GPIO_InitStruct.Pin = GPIO_PIN_0; /* PA0 = TIM2_CH1 */
+        GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+        /* Pull-down so a disconnected input reads low (no edges = failure detected)
+         * rather than floating and decoding spurious "PWM". */
+        GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+        GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+        GPIO_InitStruct.Alternate = GPIO_AF1_TIM2;
+        HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    }
+}
+
+void HAL_TIM_IC_MspDeInit(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM2)
+    {
+        __HAL_RCC_TIM2_CLK_DISABLE();
+        HAL_GPIO_DeInit(GPIOA, GPIO_PIN_0);
+    }
 }
 
 static void monitor_i2c_until_key(void)

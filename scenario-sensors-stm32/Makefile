@@ -64,6 +64,8 @@ SRCS := \
 	$(HAL_DIR)/Src/stm32f4xx_hal_pwr_ex.c \
 	$(HAL_DIR)/Src/stm32f4xx_hal_i2c.c \
 	$(HAL_DIR)/Src/stm32f4xx_hal_i2c_ex.c \
+	$(HAL_DIR)/Src/stm32f4xx_hal_tim.c \
+	$(HAL_DIR)/Src/stm32f4xx_hal_tim_ex.c \
 	$(HAL_DIR)/Src/stm32f4xx_hal_uart.c
 
 OBJS := \
@@ -84,6 +86,8 @@ OBJS := \
 	$(BUILD_DIR)/stm32f4xx_hal_pwr_ex.o \
 	$(BUILD_DIR)/stm32f4xx_hal_i2c.o \
 	$(BUILD_DIR)/stm32f4xx_hal_i2c_ex.o \
+	$(BUILD_DIR)/stm32f4xx_hal_tim.o \
+	$(BUILD_DIR)/stm32f4xx_hal_tim_ex.o \
 	$(BUILD_DIR)/stm32f4xx_hal_uart.o
 
 all: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).bin $(BUILD_DIR)/$(TARGET).hex
@@ -140,6 +144,12 @@ $(BUILD_DIR)/stm32f4xx_hal_i2c.o: $(HAL_DIR)/Src/stm32f4xx_hal_i2c.c | $(BUILD_D
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/stm32f4xx_hal_i2c_ex.o: $(HAL_DIR)/Src/stm32f4xx_hal_i2c_ex.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/stm32f4xx_hal_tim.o: $(HAL_DIR)/Src/stm32f4xx_hal_tim.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/stm32f4xx_hal_tim_ex.o: $(HAL_DIR)/Src/stm32f4xx_hal_tim_ex.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/stm32f4xx_hal_uart.o: $(HAL_DIR)/Src/stm32f4xx_hal_uart.c | $(BUILD_DIR)
