@@ -5,6 +5,9 @@
  *     * "rotors on/off" energises both pins (legacy rotor behaviour)
  *     * "rotors step <n> [fwd|rev]" drives them as a step/direction stepper
  *       interface (PC10 = STEP pulse, PC11 = DIR), as for an A4988/DRV8825
+ *     * "rotors step <n> [fwd|rev] verify [seconds]" additionally watches the
+ *       PWM feedback on PA0 while stepping, printing a health line every
+ *       `seconds` (default 1s) and stopping with a fault if the PWM is lost
  * - stepper health monitor: "monitor pwm [seconds]" measures a PWM feedback
  *   signal on PA0 (TIM2_CH1) each cycle and flags "failure detected" if the
  *   PWM stops (signal lost / motor stalled)
@@ -66,6 +69,10 @@
 #define PWM_MON_MAX_SEC 3600U
 #define PWM_MEAS_WINDOW_MS 400U /* no edge within this window = signal lost */
 #define PWM_TIM_HZ 1000000U     /* timer timebase: 1 MHz -> 1 tick = 1 us */
+/* "rotors step <n> ... verify [sec]" reuses the PWM monitor to check the motor is
+ * actually turning while we drive STEP. It prints once per second by default (vs
+ * the standalone monitor's 5s) and clamps to the same PWM_MON_MIN/MAX_SEC bounds. */
+#define PWM_VERIFY_DEFAULT_SEC 1U
 
 typedef struct
 {
@@ -148,7 +155,7 @@ static void print_help(void);
 static void print_status(void);
 static void set_rotors(GPIO_PinState state);
 static uint32_t parse_u32_default(const char *s, uint32_t defval);
-static uint32_t rotor_step(uint32_t steps, int reverse);
+static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t verify_ms, int *pwm_fault);
 static void handle_rotor_step(const char *args);
 static void pwm_input_init(void);
 static void pwm_input_deinit(void);
@@ -434,7 +441,10 @@ static void print_help(void)
     printf("  status\r\n");
     printf("  rotors on\r\n");
     printf("  rotors off\r\n");
-    printf("  rotors step <n> [fwd|rev]  (PC10=STEP pulses, PC11=DIR; ~500 steps/s; any key aborts)\r\n");
+    printf("  rotors step <n> [fwd|rev] [verify [seconds]]  (PC10=STEP pulses, PC11=DIR; ~500 steps/s;\r\n");
+    printf("                          verify watches PWM feedback on PA0 while stepping, printing every\r\n");
+    printf("                          `seconds` (default 1s) and stopping with STEP FAULT if PWM is lost;\r\n");
+    printf("                          any key aborts)\r\n");
     printf("  monitor i2c   (reads BMP280 every 1s, press any key to stop)\r\n");
     printf("  monitor pwm [seconds]  (measure PWM on PA0/TIM2_CH1 each cycle; default 5s;\r\n");
     printf("                          prints 'failure detected' if the PWM is lost; any key stops)\r\n");
@@ -532,12 +542,27 @@ static uint32_t parse_u32_default(const char *s, uint32_t defval)
 }
 
 /* Drive PC10 (STEP) with `steps` pulses; PC11 (DIR) selects direction.
- * Returns the number of steps actually issued (a key press aborts early). */
-static uint32_t rotor_step(uint32_t steps, int reverse)
+ * Returns the number of steps actually issued (a key press aborts early).
+ *
+ * When `verify` is set the caller has already brought up the PWM input (TIM2 on
+ * PA0); we then sample the motor's PWM feedback every `verify_ms` while stepping
+ * and, if a check finds no PWM (motor stalled / signal lost), stop the move, set
+ * *pwm_fault, and return early. TIM2 keeps capturing PA0 in the background, so the
+ * check is just reading it — the STEP pulses on PC10 are unaffected. */
+static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t verify_ms, int *pwm_fault)
 {
+    if (pwm_fault != NULL)
+    {
+        *pwm_fault = 0;
+    }
+
     HAL_GPIO_WritePin(STEP_PORT, DIR_PIN, reverse ? GPIO_PIN_SET : GPIO_PIN_RESET);
     HAL_Delay(1); /* let DIR settle before the first STEP edge */
 
+    /* First check one interval in, giving the motor time to spin up before we
+     * expect PWM feedback (an immediate check would falsely see "no PWM"). */
+    uint32_t next_verify_ms = HAL_GetTick() + verify_ms;
+    uint32_t cycle = 0U;
     uint32_t done = 0U;
     for (uint32_t i = 0U; i < steps; i++)
     {
@@ -550,11 +575,50 @@ static uint32_t rotor_step(uint32_t steps, int reverse)
         HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, GPIO_PIN_RESET);
         HAL_Delay(STEP_HALF_PERIOD_MS);
         done++;
+
+        if (verify)
+        {
+            uint32_t now = HAL_GetTick();
+            if ((int32_t)(now - next_verify_ms) >= 0)
+            {
+                cycle++;
+                uint32_t freq = 0U;
+                uint32_t duty = 0U;
+                uint32_t per = 0U;
+                if (pwm_measure(&freq, &duty, &per) == 0)
+                {
+                    printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu PWM ok: freq=%lu Hz duty=%lu%% period=%lu us\r\n",
+                           (unsigned long)cycle,
+                           (unsigned long)now,
+                           (unsigned long)done,
+                           (unsigned long)steps,
+                           (unsigned long)freq,
+                           (unsigned long)duty,
+                           (unsigned long)per);
+                }
+                else
+                {
+                    printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu failure detected: no PWM on PA0 (motor stalled / signal lost)\r\n",
+                           (unsigned long)cycle,
+                           (unsigned long)now,
+                           (unsigned long)done,
+                           (unsigned long)steps);
+                    if (pwm_fault != NULL)
+                    {
+                        *pwm_fault = 1;
+                    }
+                    break; /* stop the move the moment feedback is lost */
+                }
+                next_verify_ms += verify_ms;
+            }
+        }
     }
     return done;
 }
 
-/* "rotors step <n> [fwd|rev]" — args points just past "rotors step". */
+/* "rotors step <n> [fwd|rev] [verify [seconds]]" — args points just past
+ * "rotors step". After the count the direction and the verify option may appear
+ * in any order; "verify" turns on the PWM feedback check (see rotor_step). */
 static void handle_rotor_step(const char *args)
 {
     while (*args == ' ')
@@ -563,7 +627,7 @@ static void handle_rotor_step(const char *args)
     }
     if (*args < '0' || *args > '9')
     {
-        printf("usage: rotors step <n> [fwd|rev]\r\n");
+        printf("usage: rotors step <n> [fwd|rev] [verify [seconds]]\r\n");
         return;
     }
 
@@ -580,12 +644,20 @@ static void handle_rotor_step(const char *args)
     }
 
     int reverse = 0;
-    while (*p == ' ')
+    int verify = 0;
+    uint32_t verify_sec = PWM_VERIFY_DEFAULT_SEC;
+
+    /* Optional trailing tokens: fwd|rev and verify [seconds], in any order. */
+    while (1)
     {
-        p++;
-    }
-    if (*p != '\0')
-    {
+        while (*p == ' ')
+        {
+            p++;
+        }
+        if (*p == '\0')
+        {
+            break;
+        }
         char c = *p;
         if (c == 'r' || c == 'R')
         {
@@ -595,10 +667,44 @@ static void handle_rotor_step(const char *args)
         {
             reverse = 0;
         }
+        else if (c == 'v' || c == 'V')
+        {
+            verify = 1;
+            /* Skip the "verify" word, then read an optional seconds value. */
+            while (*p != '\0' && *p != ' ')
+            {
+                p++;
+            }
+            while (*p == ' ')
+            {
+                p++;
+            }
+            if (*p >= '0' && *p <= '9')
+            {
+                verify_sec = parse_u32_default(p, PWM_VERIFY_DEFAULT_SEC);
+                if (verify_sec < PWM_MON_MIN_SEC)
+                {
+                    verify_sec = PWM_MON_MIN_SEC;
+                }
+                if (verify_sec > PWM_MON_MAX_SEC)
+                {
+                    verify_sec = PWM_MON_MAX_SEC;
+                }
+                while (*p >= '0' && *p <= '9')
+                {
+                    p++;
+                }
+            }
+            continue; /* p already advanced past any seconds value */
+        }
         else
         {
-            printf("unknown direction '%s' (use fwd|rev)\r\n", p);
+            printf("unknown option '%s' (use fwd|rev, verify [seconds])\r\n", p);
             return;
+        }
+        while (*p != '\0' && *p != ' ') /* advance past fwd|rev token */
+        {
+            p++;
         }
     }
 
@@ -613,8 +719,31 @@ static void handle_rotor_step(const char *args)
            reverse ? "rev" : "fwd",
            reverse ? "HIGH" : "LOW",
            (unsigned int)(1000U / (2U * STEP_HALF_PERIOD_MS)));
-    uint32_t done = rotor_step(steps, reverse);
-    if (done < steps)
+
+    if (verify)
+    {
+        printf("STEP verify: checking PWM feedback on PA0 (TIM2_CH1) every %lu s; "
+               "failure = no PWM within %u ms (any key aborts)\r\n",
+               (unsigned long)verify_sec,
+               (unsigned int)PWM_MEAS_WINDOW_MS);
+        pwm_input_init();
+    }
+
+    int pwm_fault = 0;
+    uint32_t done = rotor_step(steps, reverse, verify, verify_sec * 1000U, &pwm_fault);
+
+    if (verify)
+    {
+        pwm_input_deinit();
+    }
+
+    if (pwm_fault)
+    {
+        printf("STEP FAULT: PWM feedback lost after %lu/%lu step(s) %s "
+               "(motor not running)\r\n",
+               (unsigned long)done, (unsigned long)steps, reverse ? "rev" : "fwd");
+    }
+    else if (done < steps)
     {
         printf("STEP aborted: %lu/%lu step(s) %s\r\n",
                (unsigned long)done, (unsigned long)steps, reverse ? "rev" : "fwd");
