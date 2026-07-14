@@ -32,6 +32,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Host unit test for the coil-current motor-fault decision (motor_health.h),
+      # driven with the exact captured waveform data. Needs only a host C compiler,
+      # so it runs before the ARM toolchain / HAL are set up.
+      - name: Unit-test coil-current fault logic
+        run: make -C scenario-sensors-stm32 test-host
+
       - name: Install ARM toolchain
         uses: carlosperate/arm-none-eabi-gcc-action@v1
         with:

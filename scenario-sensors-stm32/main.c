@@ -5,9 +5,11 @@
  *     * "rotors on/off" energises both pins (legacy rotor behaviour)
  *     * "rotors step <n> [fwd|rev]" drives them as a step/direction stepper
  *       interface (PC10 = STEP pulse, PC11 = DIR), as for an A4988/DRV8825
- *     * "rotors step <n> [fwd|rev] verify [seconds]" additionally watches the
- *       PWM feedback on PA0 while stepping, printing a health line every
- *       `seconds` (default 1s) and stopping with a fault if the PWM is lost
+ *     * "rotors step <n> [fwd|rev] verify [seconds]" additionally samples the
+ *       motor coil-current feedback on PA0 (ADC1_IN0 — the shunt/INA sense
+ *       amplifier) while stepping, printing the peak-to-peak swing every
+ *       `seconds` (default 1s) and stopping with STEP FAULT if the current
+ *       goes flat (motor stalled / open coil / driver dead)
  * - stepper health monitor: "monitor pwm [seconds]" measures a PWM feedback
  *   signal on PA0 (TIM2_CH1) each cycle and flags "failure detected" if the
  *   PWM stops (signal lost / motor stalled)
@@ -18,6 +20,7 @@
 #include "stm32f4xx_hal.h"
 #include "VL53L0X.h"
 #include "i2c.h"
+#include "motor_health.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -69,10 +72,19 @@
 #define PWM_MON_MAX_SEC 3600U
 #define PWM_MEAS_WINDOW_MS 400U /* no edge within this window = signal lost */
 #define PWM_TIM_HZ 1000000U     /* timer timebase: 1 MHz -> 1 tick = 1 us */
-/* "rotors step <n> ... verify [sec]" reuses the PWM monitor to check the motor is
- * actually turning while we drive STEP. It prints once per second by default (vs
- * the standalone monitor's 5s) and clamps to the same PWM_MON_MIN/MAX_SEC bounds. */
+/* "rotors step <n> ... verify [sec]" samples the coil-current feedback on PA0 to
+ * check the motor is actually turning while we drive STEP. It prints once per
+ * second by default (vs the standalone monitor's 5s) and clamps to the same
+ * PWM_MON_MIN/MAX_SEC bounds. */
 #define PWM_VERIFY_DEFAULT_SEC 1U
+
+/* Motor-health check via the coil-current sense on PA0 (ADC1_IN0). PA0 carries the
+ * shunt-resistor voltage through an INA sense amplifier, so a *running* motor makes
+ * the reading swing as each step energises/de-energises the coil, while a stalled
+ * or open coil (or a dead driver) leaves it sitting flat at a DC bias. The
+ * peak-to-peak decision (ADC_VREF_MV / MOTOR_SWING_MIN_MV / motor_swing_is_fault)
+ * lives in motor_health.h so the host unit test can exercise it against real
+ * captured data. 12-bit ADC against the 3.3 V VREF+ on the NUCLEO-F446RE. */
 
 typedef struct
 {
@@ -139,6 +151,7 @@ static vl53l0x_state_t g_vl53;
 static struct VL53L0X g_vl53_dev;
 static uint8_t g_i2c1_hw_inited = 0U;
 static TIM_HandleTypeDef g_pwm_tim;
+static ADC_HandleTypeDef g_adc;
 
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
@@ -155,11 +168,14 @@ static void print_help(void);
 static void print_status(void);
 static void set_rotors(GPIO_PinState state);
 static uint32_t parse_u32_default(const char *s, uint32_t defval);
-static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t verify_ms, int *pwm_fault);
+static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t verify_ms, int *motor_fault);
 static void handle_rotor_step(const char *args);
 static void pwm_input_init(void);
 static void pwm_input_deinit(void);
 static int pwm_measure(uint32_t *freq_hz, uint32_t *duty_pct, uint32_t *period_us);
+static void adc_input_init(void);
+static void adc_input_deinit(void);
+static uint16_t adc_sample(void);
 static void monitor_pwm_until_key(uint32_t period_sec);
 void HAL_TIM_IC_MspInit(TIM_HandleTypeDef *htim);
 void HAL_TIM_IC_MspDeInit(TIM_HandleTypeDef *htim);
@@ -442,9 +458,9 @@ static void print_help(void)
     printf("  rotors on\r\n");
     printf("  rotors off\r\n");
     printf("  rotors step <n> [fwd|rev] [verify [seconds]]  (PC10=STEP pulses, PC11=DIR; ~500 steps/s;\r\n");
-    printf("                          verify watches PWM feedback on PA0 while stepping, printing every\r\n");
-    printf("                          `seconds` (default 1s) and stopping with STEP FAULT if PWM is lost;\r\n");
-    printf("                          any key aborts)\r\n");
+    printf("                          verify samples coil current on PA0 (ADC1_IN0) while stepping, printing\r\n");
+    printf("                          the peak-to-peak swing every `seconds` (default 1s) and stopping with\r\n");
+    printf("                          STEP FAULT if the current goes flat (motor stalled); any key aborts)\r\n");
     printf("  monitor i2c   (reads BMP280 every 1s, press any key to stop)\r\n");
     printf("  monitor pwm [seconds]  (measure PWM on PA0/TIM2_CH1 each cycle; default 5s;\r\n");
     printf("                          prints 'failure detected' if the PWM is lost; any key stops)\r\n");
@@ -544,26 +560,29 @@ static uint32_t parse_u32_default(const char *s, uint32_t defval)
 /* Drive PC10 (STEP) with `steps` pulses; PC11 (DIR) selects direction.
  * Returns the number of steps actually issued (a key press aborts early).
  *
- * When `verify` is set the caller has already brought up the PWM input (TIM2 on
- * PA0); we then sample the motor's PWM feedback every `verify_ms` while stepping
- * and, if a check finds no PWM (motor stalled / signal lost), stop the move, set
- * *pwm_fault, and return early. TIM2 keeps capturing PA0 in the background, so the
- * check is just reading it — the STEP pulses on PC10 are unaffected. */
-static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t verify_ms, int *pwm_fault)
+ * When `verify` is set the caller has already brought up the ADC on PA0
+ * (ADC1_IN0 — the coil-current sense). We take one ADC reading per step and track
+ * the min/max over each `verify_ms` window: a running motor makes the coil-current
+ * reading swing step-to-step, so a healthy interval shows a wide peak-to-peak
+ * swing, while a stalled/open coil sits flat. If an interval's swing collapses
+ * below MOTOR_SWING_MIN_MV we stop the move, set *motor_fault, and return early. */
+static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t verify_ms, int *motor_fault)
 {
-    if (pwm_fault != NULL)
+    if (motor_fault != NULL)
     {
-        *pwm_fault = 0;
+        *motor_fault = 0;
     }
 
     HAL_GPIO_WritePin(STEP_PORT, DIR_PIN, reverse ? GPIO_PIN_SET : GPIO_PIN_RESET);
     HAL_Delay(1); /* let DIR settle before the first STEP edge */
 
     /* First check one interval in, giving the motor time to spin up before we
-     * expect PWM feedback (an immediate check would falsely see "no PWM"). */
+     * expect any coil-current swing (an immediate check would see a flat reading). */
     uint32_t next_verify_ms = HAL_GetTick() + verify_ms;
     uint32_t cycle = 0U;
     uint32_t done = 0U;
+    uint16_t adc_min = 0xFFFFU; /* min/max of the coil-current reading this interval */
+    uint16_t adc_max = 0U;
     for (uint32_t i = 0U; i < steps; i++)
     {
         if (usart1_read_byte_nonblocking(&rx_byte))
@@ -578,37 +597,51 @@ static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t ver
 
         if (verify)
         {
+            uint16_t s = adc_sample(); /* coil-current sense on PA0 for this step */
+            if (s < adc_min)
+            {
+                adc_min = s;
+            }
+            if (s > adc_max)
+            {
+                adc_max = s;
+            }
+
             uint32_t now = HAL_GetTick();
             if ((int32_t)(now - next_verify_ms) >= 0)
             {
                 cycle++;
-                uint32_t freq = 0U;
-                uint32_t duty = 0U;
-                uint32_t per = 0U;
-                if (pwm_measure(&freq, &duty, &per) == 0)
+                uint32_t min_mv = adc_counts_to_mv(adc_min);
+                uint32_t max_mv = adc_counts_to_mv(adc_max);
+                uint32_t vpp_mv = motor_swing_vpp_mv(adc_min, adc_max);
+                if (!motor_swing_is_fault(adc_min, adc_max))
                 {
-                    printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu PWM ok: freq=%lu Hz duty=%lu%% period=%lu us\r\n",
+                    printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu motor ok: coil Vpp=%lu mV (min=%lu mV max=%lu mV)\r\n",
                            (unsigned long)cycle,
                            (unsigned long)now,
                            (unsigned long)done,
                            (unsigned long)steps,
-                           (unsigned long)freq,
-                           (unsigned long)duty,
-                           (unsigned long)per);
+                           (unsigned long)vpp_mv,
+                           (unsigned long)min_mv,
+                           (unsigned long)max_mv);
                 }
                 else
                 {
-                    printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu failure detected: no PWM on PA0 (motor stalled / signal lost)\r\n",
+                    printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu failure detected: coil current flat on PA0, Vpp=%lu mV < %u mV (motor stalled / open coil)\r\n",
                            (unsigned long)cycle,
                            (unsigned long)now,
                            (unsigned long)done,
-                           (unsigned long)steps);
-                    if (pwm_fault != NULL)
+                           (unsigned long)steps,
+                           (unsigned long)vpp_mv,
+                           (unsigned int)MOTOR_SWING_MIN_MV);
+                    if (motor_fault != NULL)
                     {
-                        *pwm_fault = 1;
+                        *motor_fault = 1;
                     }
-                    break; /* stop the move the moment feedback is lost */
+                    break; /* stop the move the moment the coil current goes flat */
                 }
+                adc_min = 0xFFFFU; /* reset the window for the next interval */
+                adc_max = 0U;
                 next_verify_ms += verify_ms;
             }
         }
@@ -722,24 +755,24 @@ static void handle_rotor_step(const char *args)
 
     if (verify)
     {
-        printf("STEP verify: checking PWM feedback on PA0 (TIM2_CH1) every %lu s; "
-               "failure = no PWM within %u ms (any key aborts)\r\n",
+        printf("STEP verify: watching coil current on PA0 (ADC1_IN0) every %lu s; "
+               "failure = peak-to-peak swing < %u mV (motor flat; any key aborts)\r\n",
                (unsigned long)verify_sec,
-               (unsigned int)PWM_MEAS_WINDOW_MS);
-        pwm_input_init();
+               (unsigned int)MOTOR_SWING_MIN_MV);
+        adc_input_init();
     }
 
-    int pwm_fault = 0;
-    uint32_t done = rotor_step(steps, reverse, verify, verify_sec * 1000U, &pwm_fault);
+    int motor_fault = 0;
+    uint32_t done = rotor_step(steps, reverse, verify, verify_sec * 1000U, &motor_fault);
 
     if (verify)
     {
-        pwm_input_deinit();
+        adc_input_deinit();
     }
 
-    if (pwm_fault)
+    if (motor_fault)
     {
-        printf("STEP FAULT: PWM feedback lost after %lu/%lu step(s) %s "
+        printf("STEP FAULT: coil current went flat after %lu/%lu step(s) %s "
                "(motor not running)\r\n",
                (unsigned long)done, (unsigned long)steps, reverse ? "rev" : "fwd");
     }
@@ -927,6 +960,84 @@ void HAL_TIM_IC_MspDeInit(TIM_HandleTypeDef *htim)
     if (htim->Instance == TIM2)
     {
         __HAL_RCC_TIM2_CLK_DISABLE();
+        HAL_GPIO_DeInit(GPIOA, GPIO_PIN_0);
+    }
+}
+
+/* Bring up ADC1 on PA0 (ADC1_IN0) for the coil-current sense, single software-
+ * triggered 12-bit conversions. PA0 is shared with the TIM2 PWM monitor above;
+ * "rotors step ... verify" uses this ADC path, "monitor pwm" uses the timer path,
+ * and each configures/tears down PA0 on entry/exit so they never collide. */
+static void adc_input_init(void)
+{
+    g_adc.Instance = ADC1;
+    g_adc.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+    g_adc.Init.Resolution = ADC_RESOLUTION_12B;
+    g_adc.Init.ScanConvMode = DISABLE;
+    g_adc.Init.ContinuousConvMode = DISABLE;
+    g_adc.Init.DiscontinuousConvMode = DISABLE;
+    g_adc.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+    g_adc.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+    g_adc.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+    g_adc.Init.NbrOfConversion = 1U;
+    g_adc.Init.DMAContinuousRequests = DISABLE;
+    g_adc.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+    if (HAL_ADC_Init(&g_adc) != HAL_OK)
+    {
+        printf("ADC monitor: ADC1 init failed\r\n");
+        return;
+    }
+
+    ADC_ChannelConfTypeDef sChannel = {0};
+    sChannel.Channel = ADC_CHANNEL_0; /* PA0 = ADC1_IN0 */
+    sChannel.Rank = 1U;
+    sChannel.SamplingTime = ADC_SAMPLETIME_84CYCLES; /* op-amp output settles fast */
+    (void)HAL_ADC_ConfigChannel(&g_adc, &sChannel);
+}
+
+static void adc_input_deinit(void)
+{
+    (void)HAL_ADC_DeInit(&g_adc);
+}
+
+/* One 12-bit conversion of the coil-current sense on PA0. Returns 0..4095; on a
+ * conversion timeout it returns 0 (reads as "flat", which is the safe/fault side). */
+static uint16_t adc_sample(void)
+{
+    if (HAL_ADC_Start(&g_adc) != HAL_OK)
+    {
+        return 0U;
+    }
+    if (HAL_ADC_PollForConversion(&g_adc, 2U) != HAL_OK)
+    {
+        HAL_ADC_Stop(&g_adc);
+        return 0U;
+    }
+    uint16_t v = (uint16_t)HAL_ADC_GetValue(&g_adc);
+    HAL_ADC_Stop(&g_adc);
+    return v;
+}
+
+void HAL_ADC_MspInit(ADC_HandleTypeDef *hadc)
+{
+    if (hadc->Instance == ADC1)
+    {
+        __HAL_RCC_GPIOA_CLK_ENABLE();
+        __HAL_RCC_ADC1_CLK_ENABLE();
+
+        GPIO_InitTypeDef GPIO_InitStruct = {0};
+        GPIO_InitStruct.Pin = GPIO_PIN_0; /* PA0 = ADC1_IN0 */
+        GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+        GPIO_InitStruct.Pull = GPIO_NOPULL;
+        HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    }
+}
+
+void HAL_ADC_MspDeInit(ADC_HandleTypeDef *hadc)
+{
+    if (hadc->Instance == ADC1)
+    {
+        __HAL_RCC_ADC1_CLK_DISABLE();
         HAL_GPIO_DeInit(GPIOA, GPIO_PIN_0);
     }
 }

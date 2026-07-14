@@ -160,11 +160,13 @@ def test_scenario_boots_over_cloud(dut, wiring, firmware, build_report):
         assert uart.expect("failure detected", timeout=6), \
             f"PWM monitor did not report failure on an idle pin; captured:\n{uart.text}"
 
-        # 6) Stepper with in-line PWM verify: "rotors step <n> verify" watches the PA0
-        #    feedback while stepping. The move is long enough (~2.4s @ ~500 steps/s) to
-        #    cross the 1s verify interval; with PA0 idle the check finds no PWM and must
-        #    stop the move with STEP FAULT rather than STEP done.
+        # 6) Stepper with in-line coil-current verify: "rotors step <n> verify" samples the
+        #    motor coil-current sense on PA0 (ADC1_IN0) while stepping and flags a motor fault
+        #    when the peak-to-peak swing collapses (stalled / open coil). The move is long
+        #    enough (~2.4s @ ~500 steps/s) to cross the 1s verify interval; with PA0 idle the
+        #    reading is flat, so the check must stop the move with STEP FAULT rather than STEP
+        #    done.
         uart.drain()
         uart.write("rotors step 1200 verify\r\n")
         assert uart.expect("STEP FAULT", timeout=8), \
-            f"stepper verify did not fault on missing PWM feedback; captured:\n{uart.text}"
+            f"stepper verify did not fault on flat coil current; captured:\n{uart.text}"

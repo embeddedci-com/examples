@@ -66,6 +66,8 @@ SRCS := \
 	$(HAL_DIR)/Src/stm32f4xx_hal_i2c_ex.c \
 	$(HAL_DIR)/Src/stm32f4xx_hal_tim.c \
 	$(HAL_DIR)/Src/stm32f4xx_hal_tim_ex.c \
+	$(HAL_DIR)/Src/stm32f4xx_hal_adc.c \
+	$(HAL_DIR)/Src/stm32f4xx_hal_adc_ex.c \
 	$(HAL_DIR)/Src/stm32f4xx_hal_uart.c
 
 OBJS := \
@@ -88,6 +90,8 @@ OBJS := \
 	$(BUILD_DIR)/stm32f4xx_hal_i2c_ex.o \
 	$(BUILD_DIR)/stm32f4xx_hal_tim.o \
 	$(BUILD_DIR)/stm32f4xx_hal_tim_ex.o \
+	$(BUILD_DIR)/stm32f4xx_hal_adc.o \
+	$(BUILD_DIR)/stm32f4xx_hal_adc_ex.o \
 	$(BUILD_DIR)/stm32f4xx_hal_uart.o
 
 all: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).bin $(BUILD_DIR)/$(TARGET).hex
@@ -152,6 +156,12 @@ $(BUILD_DIR)/stm32f4xx_hal_tim.o: $(HAL_DIR)/Src/stm32f4xx_hal_tim.c | $(BUILD_D
 $(BUILD_DIR)/stm32f4xx_hal_tim_ex.o: $(HAL_DIR)/Src/stm32f4xx_hal_tim_ex.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/stm32f4xx_hal_adc.o: $(HAL_DIR)/Src/stm32f4xx_hal_adc.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/stm32f4xx_hal_adc_ex.o: $(HAL_DIR)/Src/stm32f4xx_hal_adc_ex.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/stm32f4xx_hal_uart.o: $(HAL_DIR)/Src/stm32f4xx_hal_uart.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -171,4 +181,11 @@ clean:
 flash: $(BUILD_DIR)/$(TARGET).elf
 	st-flash write $(BUILD_DIR)/$(TARGET).bin 0x08000000
 
-.PHONY: all clean flash
+# Host unit test for the coil-current fault decision (motor_health.h). Native
+# build, no MCU/HAL — proves the flat-line detection against the captured data.
+HOSTCC ?= cc
+test-host: | $(BUILD_DIR)
+	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -I. tests/test_motor_health.c -o $(BUILD_DIR)/test_motor_health
+	$(BUILD_DIR)/test_motor_health
+
+.PHONY: all clean flash test-host
