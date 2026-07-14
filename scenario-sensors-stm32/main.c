@@ -72,11 +72,18 @@
 #define PWM_MON_MAX_SEC 3600U
 #define PWM_MEAS_WINDOW_MS 400U /* no edge within this window = signal lost */
 #define PWM_TIM_HZ 1000000U     /* timer timebase: 1 MHz -> 1 tick = 1 us */
-/* "rotors step <n> ... verify [sec]" samples the coil-current feedback on PA0 to
- * check the motor is actually turning while we drive STEP. It prints once per
- * second by default (vs the standalone monitor's 5s) and clamps to the same
- * PWM_MON_MIN/MAX_SEC bounds. */
-#define PWM_VERIFY_DEFAULT_SEC 1U
+/* "rotors step <n> ... verify [ms]" samples the coil-current feedback on PA0 to
+ * check the motor is actually turning while we drive STEP. The optional argument
+ * is the check interval in MILLISECONDS (default 1000): each interval the coil
+ * swing is evaluated and a fault stops the move, so a sub-second value catches a
+ * fault faster. The floor spans several electrical cycles of the stepper so a
+ * window always contains a full swing (at ~500 steps/s one cycle is ~8 ms). */
+#define STEP_VERIFY_DEFAULT_MS 1000U
+#define STEP_VERIFY_MIN_MS 50U
+#define STEP_VERIFY_MAX_MS 3600000U
+/* Healthy "motor ok" lines are throttled to at most one per this interval so a
+ * sub-second check interval doesn't flood the console; a fault always prints. */
+#define STEP_VERIFY_PRINT_MIN_MS 1000U
 
 /* Motor-health check via the coil-current sense on PA0 (ADC1_IN0). PA0 carries the
  * shunt-resistor voltage through an INA sense amplifier, so a *running* motor makes
@@ -457,10 +464,11 @@ static void print_help(void)
     printf("  status\r\n");
     printf("  rotors on\r\n");
     printf("  rotors off\r\n");
-    printf("  rotors step <n> [fwd|rev] [verify [seconds]]  (PC10=STEP pulses, PC11=DIR; ~500 steps/s;\r\n");
-    printf("                          verify samples coil current on PA0 (ADC1_IN0) while stepping, printing\r\n");
-    printf("                          the peak-to-peak swing every `seconds` (default 1s) and stopping with\r\n");
-    printf("                          STEP FAULT if the current goes flat (motor stalled); any key aborts)\r\n");
+    printf("  rotors step <n> [fwd|rev] [verify [ms]]  (PC10=STEP pulses, PC11=DIR; ~500 steps/s;\r\n");
+    printf("                          verify samples coil current on PA0 (ADC1_IN0) while stepping, checking\r\n");
+    printf("                          the peak-to-peak swing every `ms` (default 1000, min 50; status printed\r\n");
+    printf("                          at most once/s) and stopping with STEP FAULT if the current goes flat\r\n");
+    printf("                          (motor stalled); any key aborts)\r\n");
     printf("  monitor i2c   (reads BMP280 every 1s, press any key to stop)\r\n");
     printf("  monitor pwm [seconds]  (measure PWM on PA0/TIM2_CH1 each cycle; default 5s;\r\n");
     printf("                          prints 'failure detected' if the PWM is lost; any key stops)\r\n");
@@ -579,6 +587,9 @@ static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t ver
     /* First check one interval in, giving the motor time to spin up before we
      * expect any coil-current swing (an immediate check would see a flat reading). */
     uint32_t next_verify_ms = HAL_GetTick() + verify_ms;
+    /* Healthy status is printed at most once per STEP_VERIFY_PRINT_MIN_MS even when
+     * the check interval is shorter, so a sub-second interval doesn't flood output. */
+    uint32_t last_print_ms = HAL_GetTick();
     uint32_t cycle = 0U;
     uint32_t done = 0U;
     uint16_t adc_min = 0xFFFFU; /* min/max of the coil-current reading this interval */
@@ -614,19 +625,9 @@ static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t ver
                 uint32_t min_mv = adc_counts_to_mv(adc_min);
                 uint32_t max_mv = adc_counts_to_mv(adc_max);
                 uint32_t vpp_mv = motor_swing_vpp_mv(adc_min, adc_max);
-                if (!motor_swing_is_fault(adc_min, adc_max))
+                if (motor_swing_is_fault(adc_min, adc_max))
                 {
-                    printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu motor ok: coil Vpp=%lu mV (min=%lu mV max=%lu mV)\r\n",
-                           (unsigned long)cycle,
-                           (unsigned long)now,
-                           (unsigned long)done,
-                           (unsigned long)steps,
-                           (unsigned long)vpp_mv,
-                           (unsigned long)min_mv,
-                           (unsigned long)max_mv);
-                }
-                else
-                {
+                    /* Faults always print (and stop the move), regardless of throttle. */
                     printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu failure detected: coil current flat on PA0, Vpp=%lu mV < %u mV (motor stalled / open coil)\r\n",
                            (unsigned long)cycle,
                            (unsigned long)now,
@@ -640,6 +641,19 @@ static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t ver
                     }
                     break; /* stop the move the moment the coil current goes flat */
                 }
+                /* Healthy: throttle to one line per STEP_VERIFY_PRINT_MIN_MS. */
+                if ((int32_t)(now - last_print_ms) >= (int32_t)STEP_VERIFY_PRINT_MIN_MS)
+                {
+                    printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu motor ok: coil Vpp=%lu mV (min=%lu mV max=%lu mV)\r\n",
+                           (unsigned long)cycle,
+                           (unsigned long)now,
+                           (unsigned long)done,
+                           (unsigned long)steps,
+                           (unsigned long)vpp_mv,
+                           (unsigned long)min_mv,
+                           (unsigned long)max_mv);
+                    last_print_ms = now;
+                }
                 adc_min = 0xFFFFU; /* reset the window for the next interval */
                 adc_max = 0U;
                 next_verify_ms += verify_ms;
@@ -649,9 +663,10 @@ static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t ver
     return done;
 }
 
-/* "rotors step <n> [fwd|rev] [verify [seconds]]" — args points just past
- * "rotors step". After the count the direction and the verify option may appear
- * in any order; "verify" turns on the PWM feedback check (see rotor_step). */
+/* "rotors step <n> [fwd|rev] [verify [ms]]" — args points just past "rotors step".
+ * After the count the direction and the verify option may appear in any order;
+ * "verify" turns on the coil-current check (see rotor_step), with an optional check
+ * interval in milliseconds. */
 static void handle_rotor_step(const char *args)
 {
     while (*args == ' ')
@@ -660,7 +675,7 @@ static void handle_rotor_step(const char *args)
     }
     if (*args < '0' || *args > '9')
     {
-        printf("usage: rotors step <n> [fwd|rev] [verify [seconds]]\r\n");
+        printf("usage: rotors step <n> [fwd|rev] [verify [ms]]\r\n");
         return;
     }
 
@@ -678,9 +693,9 @@ static void handle_rotor_step(const char *args)
 
     int reverse = 0;
     int verify = 0;
-    uint32_t verify_sec = PWM_VERIFY_DEFAULT_SEC;
+    uint32_t verify_ms = STEP_VERIFY_DEFAULT_MS;
 
-    /* Optional trailing tokens: fwd|rev and verify [seconds], in any order. */
+    /* Optional trailing tokens: fwd|rev and verify [ms], in any order. */
     while (1)
     {
         while (*p == ' ')
@@ -703,7 +718,7 @@ static void handle_rotor_step(const char *args)
         else if (c == 'v' || c == 'V')
         {
             verify = 1;
-            /* Skip the "verify" word, then read an optional seconds value. */
+            /* Skip the "verify" word, then read an optional interval in ms. */
             while (*p != '\0' && *p != ' ')
             {
                 p++;
@@ -714,25 +729,25 @@ static void handle_rotor_step(const char *args)
             }
             if (*p >= '0' && *p <= '9')
             {
-                verify_sec = parse_u32_default(p, PWM_VERIFY_DEFAULT_SEC);
-                if (verify_sec < PWM_MON_MIN_SEC)
+                verify_ms = parse_u32_default(p, STEP_VERIFY_DEFAULT_MS);
+                if (verify_ms < STEP_VERIFY_MIN_MS)
                 {
-                    verify_sec = PWM_MON_MIN_SEC;
+                    verify_ms = STEP_VERIFY_MIN_MS;
                 }
-                if (verify_sec > PWM_MON_MAX_SEC)
+                if (verify_ms > STEP_VERIFY_MAX_MS)
                 {
-                    verify_sec = PWM_MON_MAX_SEC;
+                    verify_ms = STEP_VERIFY_MAX_MS;
                 }
                 while (*p >= '0' && *p <= '9')
                 {
                     p++;
                 }
             }
-            continue; /* p already advanced past any seconds value */
+            continue; /* p already advanced past any ms value */
         }
         else
         {
-            printf("unknown option '%s' (use fwd|rev, verify [seconds])\r\n", p);
+            printf("unknown option '%s' (use fwd|rev, verify [ms])\r\n", p);
             return;
         }
         while (*p != '\0' && *p != ' ') /* advance past fwd|rev token */
@@ -755,15 +770,16 @@ static void handle_rotor_step(const char *args)
 
     if (verify)
     {
-        printf("STEP verify: watching coil current on PA0 (ADC1_IN0) every %lu s; "
-               "failure = peak-to-peak swing < %u mV (motor flat; any key aborts)\r\n",
-               (unsigned long)verify_sec,
+        printf("STEP verify: watching coil current on PA0 (ADC1_IN0) every %lu ms "
+               "(status printed <=1/s); failure = peak-to-peak swing < %u mV "
+               "(motor flat; any key aborts)\r\n",
+               (unsigned long)verify_ms,
                (unsigned int)MOTOR_SWING_MIN_MV);
         adc_input_init();
     }
 
     int motor_fault = 0;
-    uint32_t done = rotor_step(steps, reverse, verify, verify_sec * 1000U, &motor_fault);
+    uint32_t done = rotor_step(steps, reverse, verify, verify_ms, &motor_fault);
 
     if (verify)
     {
