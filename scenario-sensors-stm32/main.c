@@ -9,10 +9,11 @@
  *       motor coil-current feedback on PA0 (ADC1_IN0 — the shunt/INA sense
  *       amplifier) while stepping, printing the peak-to-peak swing every
  *       `seconds` (default 1s) and stopping with STEP FAULT if the current
- *       goes flat (motor stalled / open coil / driver dead)
+ *       goes flat *after* the motor has been seen running (a slow start keeps
+ *       checking; motor stalled / open coil / driver dead)
  * - stepper health monitor: "monitor pwm [seconds]" measures a PWM feedback
  *   signal on PA0 (TIM2_CH1) each cycle and flags "failure detected" if the
- *   PWM stops (signal lost / motor stalled)
+ *   PWM stops after it has been seen (a slow start keeps waiting)
  * - BMP280 on I2C1 (PB8/PB9), auto-detect 0x76/0x77
  * - VL53L0X on same bus (default addr 0x29) for bus validation
  */
@@ -468,10 +469,12 @@ static void print_help(void)
     printf("                          verify samples coil current on PA0 (ADC1_IN0) while stepping, checking\r\n");
     printf("                          the peak-to-peak swing every `ms` (default 1000, min 50; status printed\r\n");
     printf("                          at most once/s) and stopping with STEP FAULT if the current goes flat\r\n");
-    printf("                          (motor stalled); any key aborts)\r\n");
+    printf("                          *after* the motor has been seen running (slow start keeps checking);\r\n");
+    printf("                          any key aborts)\r\n");
     printf("  monitor i2c   (reads BMP280 every 1s, press any key to stop)\r\n");
     printf("  monitor pwm [seconds]  (measure PWM on PA0/TIM2_CH1 each cycle; default 5s;\r\n");
-    printf("                          prints 'failure detected' if the PWM is lost; any key stops)\r\n");
+    printf("                          'failure detected' only after the PWM has been seen (slow start\r\n");
+    printf("                          keeps waiting); any key stops)\r\n");
     printf("  sensor init   (BMP280 + VL53L0X, 500ms retry; I2C scan once at start; any key stops)\r\n");
     printf("  i2c scan      (HAL_I2C_IsDeviceReady 0x08-0x77, highlights 0x29)\r\n");
     printf("  vl53 test     (read VL53L0X model ID reg 0xC0; alias: vl53l0x test)\r\n");
@@ -572,8 +575,14 @@ static uint32_t parse_u32_default(const char *s, uint32_t defval)
  * (ADC1_IN0 — the coil-current sense). We take one ADC reading per step and track
  * the min/max over each `verify_ms` window: a running motor makes the coil-current
  * reading swing step-to-step, so a healthy interval shows a wide peak-to-peak
- * swing, while a stalled/open coil sits flat. If an interval's swing collapses
- * below MOTOR_SWING_MIN_MV we stop the move, set *motor_fault, and return early. */
+ * swing, while a stalled/open coil sits flat.
+ *
+ * A flat interval is only a fault once the motor has actually been seen running:
+ * we latch "coil current seen" the first time an interval swings above
+ * MOTOR_SWING_MIN_MV, and only a collapse back to flat *after* that stops the
+ * move (sets *motor_fault, returns early). A flat reading before the first swing
+ * just means the motor hasn't spun up yet, so we keep checking the next
+ * intervals rather than faulting on a slow start. */
 static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t verify_ms, int *motor_fault)
 {
     if (motor_fault != NULL)
@@ -594,6 +603,7 @@ static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t ver
     uint32_t done = 0U;
     uint16_t adc_min = 0xFFFFU; /* min/max of the coil-current reading this interval */
     uint16_t adc_max = 0U;
+    int motor_seen = 0; /* latched once an interval swings above the flat threshold */
     for (uint32_t i = 0U; i < steps; i++)
     {
         if (usart1_read_byte_nonblocking(&rx_byte))
@@ -627,8 +637,30 @@ static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t ver
                 uint32_t vpp_mv = motor_swing_vpp_mv(adc_min, adc_max);
                 if (motor_swing_is_fault(adc_min, adc_max))
                 {
-                    /* Faults always print (and stop the move), regardless of throttle. */
-                    printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu failure detected: coil current flat on PA0, Vpp=%lu mV < %u mV (motor stalled / open coil)\r\n",
+                    if (!motor_seen)
+                    {
+                        /* Motor hasn't spun up yet — a flat reading before the first
+                         * swing is a slow start, not a fault. Keep checking (throttled),
+                         * the coil current may come on in a later interval. */
+                        if ((int32_t)(now - last_print_ms) >= (int32_t)STEP_VERIFY_PRINT_MIN_MS)
+                        {
+                            printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu waiting: coil current still flat on PA0, Vpp=%lu mV < %u mV (motor not spinning yet)\r\n",
+                                   (unsigned long)cycle,
+                                   (unsigned long)now,
+                                   (unsigned long)done,
+                                   (unsigned long)steps,
+                                   (unsigned long)vpp_mv,
+                                   (unsigned int)MOTOR_SWING_MIN_MV);
+                            last_print_ms = now;
+                        }
+                        adc_min = 0xFFFFU; /* reset the window for the next interval */
+                        adc_max = 0U;
+                        next_verify_ms += verify_ms;
+                        continue;
+                    }
+                    /* Motor was seen running and has now gone flat: real fault.
+                     * Always print (and stop the move), regardless of throttle. */
+                    printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu failure detected: coil current went flat on PA0, Vpp=%lu mV < %u mV (motor stalled / open coil)\r\n",
                            (unsigned long)cycle,
                            (unsigned long)now,
                            (unsigned long)done,
@@ -641,7 +673,9 @@ static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t ver
                     }
                     break; /* stop the move the moment the coil current goes flat */
                 }
-                /* Healthy: throttle to one line per STEP_VERIFY_PRINT_MIN_MS. */
+                /* Healthy swing: latch that we've seen the motor running, then
+                 * throttle status to one line per STEP_VERIFY_PRINT_MIN_MS. */
+                motor_seen = 1;
                 if ((int32_t)(now - last_print_ms) >= (int32_t)STEP_VERIFY_PRINT_MIN_MS)
                 {
                     printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu motor ok: coil Vpp=%lu mV (min=%lu mV max=%lu mV)\r\n",
@@ -771,8 +805,8 @@ static void handle_rotor_step(const char *args)
     if (verify)
     {
         printf("STEP verify: watching coil current on PA0 (ADC1_IN0) every %lu ms "
-               "(status printed <=1/s); failure = peak-to-peak swing < %u mV "
-               "(motor flat; any key aborts)\r\n",
+               "(status printed <=1/s); failure = swing drops below %u mV *after* the "
+               "motor has been seen running (a slow start keeps checking; any key aborts)\r\n",
                (unsigned long)verify_ms,
                (unsigned int)MOTOR_SWING_MIN_MV);
         adc_input_init();
@@ -910,11 +944,12 @@ static void monitor_pwm_until_key(uint32_t period_sec)
     pwm_input_init();
     printf("monitoring PWM on PA0 (TIM2_CH1) every %lu s (press any key to stop)\r\n",
            (unsigned long)period_sec);
-    printf("failure = no PWM edges within %u ms (signal lost / motor stalled)\r\n",
-           (unsigned int)PWM_MEAS_WINDOW_MS);
+    printf("failure = PWM lost *after* it has been seen (no edges before the first "
+           "reading just keeps waiting)\r\n");
 
     uint32_t next_ms = HAL_GetTick();
     uint32_t cycle = 0U;
+    int pwm_seen = 0; /* latched once a cycle reads a valid PWM signal */
     while (1)
     {
         if (usart1_read_byte_nonblocking(&rx_byte))
@@ -932,6 +967,7 @@ static void monitor_pwm_until_key(uint32_t period_sec)
             uint32_t per = 0U;
             if (pwm_measure(&freq, &duty, &per) == 0)
             {
+                pwm_seen = 1; /* latch that the PWM has actually been running */
                 printf("cycle=%lu tick=%lu ms PWM ok: freq=%lu Hz duty=%lu%% period=%lu us\r\n",
                        (unsigned long)cycle,
                        (unsigned long)now,
@@ -939,12 +975,20 @@ static void monitor_pwm_until_key(uint32_t period_sec)
                        (unsigned long)duty,
                        (unsigned long)per);
             }
-            else
+            else if (!pwm_seen)
             {
-                printf("cycle=%lu tick=%lu ms failure detected: no PWM on PA0 (signal lost)\r\n",
+                /* PWM hasn't started yet — keep waiting rather than faulting on a
+                 * slow start; the signal may come on in a later cycle. */
+                printf("cycle=%lu tick=%lu ms waiting: no PWM on PA0 yet (not started)\r\n",
                        (unsigned long)cycle,
                        (unsigned long)now);
-                break; /* stop monitoring on failure */
+            }
+            else
+            {
+                printf("cycle=%lu tick=%lu ms failure detected: PWM lost on PA0 (signal stopped)\r\n",
+                       (unsigned long)cycle,
+                       (unsigned long)now);
+                break; /* stop monitoring once a previously-running PWM drops out */
             }
             next_ms += period_ms;
         }

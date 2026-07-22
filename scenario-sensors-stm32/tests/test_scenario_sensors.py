@@ -154,19 +154,28 @@ def test_scenario_boots_over_cloud(dut, wiring, firmware, build_report):
             f"DUT did not complete stepper move; captured:\n{uart.text}"
 
         # 5) PWM health monitor: with nothing driving PA0 (TIM2_CH1, internal pull-down)
-        #    the monitor sees no edges and must flag failure on the first cycle, then stop.
+        #    the PWM is never seen, so the monitor treats it as "not started yet" and keeps
+        #    waiting rather than faulting on a slow start — it must NOT report "failure
+        #    detected" (that fires only after a PWM has been seen and then lost).
         uart.drain()
         uart.write("monitor pwm 1\r\n")
-        assert uart.expect("failure detected", timeout=6), \
-            f"PWM monitor did not report failure on an idle pin; captured:\n{uart.text}"
+        assert uart.expect("waiting: no PWM on PA0 yet", timeout=6), \
+            f"PWM monitor did not wait on an idle pin; captured:\n{uart.text}"
+        assert "failure detected" not in uart.text, \
+            f"PWM monitor wrongly faulted on a never-started signal; captured:\n{uart.text}"
+        uart.write("\r\n")  # any key stops the monitor
+        assert uart.expect("PWM monitor stopped", timeout=4), \
+            f"PWM monitor did not stop on keypress; captured:\n{uart.text}"
 
         # 6) Stepper with in-line coil-current verify: "rotors step <n> verify" samples the
-        #    motor coil-current sense on PA0 (ADC1_IN0) while stepping and flags a motor fault
-        #    when the peak-to-peak swing collapses (stalled / open coil). The move is long
-        #    enough (~2.4s @ ~500 steps/s) to cross the 1s verify interval; with PA0 idle the
-        #    reading is flat, so the check must stop the move with STEP FAULT rather than STEP
-        #    done.
+        #    motor coil-current sense on PA0 (ADC1_IN0) while stepping. A flat reading is only
+        #    a fault once the motor has been seen running; with PA0 idle the coil current never
+        #    swings, so the move must keep checking (printing "waiting") and run to completion
+        #    (STEP done) rather than faulting on a motor that never spun up. The move is long
+        #    enough (~2.4s @ ~500 steps/s) to cross the 1s verify interval at least twice.
         uart.drain()
         uart.write("rotors step 1200 verify\r\n")
-        assert uart.expect("STEP FAULT", timeout=8), \
-            f"stepper verify did not fault on flat coil current; captured:\n{uart.text}"
+        assert uart.expect("waiting: coil current still flat", timeout=8), \
+            f"stepper verify did not wait on flat coil current; captured:\n{uart.text}"
+        assert uart.expect("STEP done", timeout=8), \
+            f"stepper verify wrongly faulted on a never-running motor; captured:\n{uart.text}"
