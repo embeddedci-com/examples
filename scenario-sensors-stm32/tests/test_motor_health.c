@@ -1,6 +1,6 @@
 /*
  * Host unit test for the coil-current motor-fault decision (motor_health.h), the
- * logic behind "rotors step ... verify" in main.c. It runs natively (no MCU/HAL)
+ * logic behind "stepmotor ... verify" in main.c. It runs natively (no MCU/HAL)
  * so CI can prove the flat-line detection against the exact waveform we captured.
  *
  * Build & run:  make test-host   (or: cc -I.. tests/test_motor_health.c && ./a.out)
@@ -75,9 +75,59 @@ int main(void)
         failures++;
     }
 
+    /* 4) Step-pulse timing budget (step_pad_us): the in-line verify work must not
+     *    lengthen the STEP period. With STEP_HIGH_US high + verify work already spent,
+     *    step_pad_us must pad exactly up to STEP_PERIOD_US when the work fits the
+     *    low-phase budget, and flag an overrun (0 pad) when it doesn't. This is the
+     *    math that keeps the pulse train smooth while "verifying a lot". */
+    printf("timing   period=%u us high=%u us low-budget=%u us\n",
+           (unsigned)STEP_PERIOD_US, (unsigned)STEP_HIGH_US, (unsigned)STEP_LOW_BUDGET_US);
+
+    /* 4a) A cheap ADC sample (~30 us) inside the low phase: no overrun, and the pad
+     *     brings the total step back to exactly STEP_PERIOD_US. */
+    {
+        int overrun = -1;
+        uint32_t used = STEP_HIGH_US + 30U; /* high pulse + a typical ~30 us sample */
+        uint32_t pad = step_pad_us(STEP_PERIOD_US, used, &overrun);
+        printf("  used=%lu us -> pad=%lu us overrun=%d (expect no overrun, total=%u us)\n",
+               (unsigned long)used, (unsigned long)pad, overrun, (unsigned)STEP_PERIOD_US);
+        if (overrun != 0 || used + pad != STEP_PERIOD_US)
+        {
+            printf("  FAIL: a cheap sample must fit the budget and pad to a strict period\n");
+            failures++;
+        }
+    }
+
+    /* 4b) Verify work exactly filling the low-phase budget: still no overrun, pad 0. */
+    {
+        int overrun = -1;
+        uint32_t used = STEP_HIGH_US + STEP_LOW_BUDGET_US; /* == STEP_PERIOD_US */
+        uint32_t pad = step_pad_us(STEP_PERIOD_US, used, &overrun);
+        if (overrun != 0 || pad != 0U)
+        {
+            printf("  FAIL: work that exactly fills the budget must not be an overrun\n");
+            failures++;
+        }
+    }
+
+    /* 4c) Verify work that blows the budget (e.g. a stalled/timed-out ADC read): the
+     *     step slipped, so step_pad_us must report an overrun and no negative pad. */
+    {
+        int overrun = -1;
+        uint32_t used = STEP_PERIOD_US + 500U; /* 500 us past the period */
+        uint32_t pad = step_pad_us(STEP_PERIOD_US, used, &overrun);
+        printf("  used=%lu us -> pad=%lu us overrun=%d (expect overrun)\n",
+               (unsigned long)used, (unsigned long)pad, overrun);
+        if (overrun != 1 || pad != 0U)
+        {
+            printf("  FAIL: work over budget must be flagged as an overrun with 0 pad\n");
+            failures++;
+        }
+    }
+
     if (failures == 0)
     {
-        printf("\nPASS: coil-current fault detection matches the captured data\n");
+        printf("\nPASS: coil-current fault detection + step timing budget hold\n");
         return 0;
     }
     printf("\n%d check(s) FAILED\n", failures);

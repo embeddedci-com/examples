@@ -3,9 +3,9 @@
  * - USART1 interactive menu (line-buffering off for interactive echo)
  * - rotor / stepper outputs on PC10/PC11
  *     * "rotors on/off" energises both pins (legacy rotor behaviour)
- *     * "rotors step <n> [fwd|rev]" drives them as a step/direction stepper
+ *     * "stepmotor <n> [fwd|rev]" drives them as a step/direction stepper
  *       interface (PC10 = STEP pulse, PC11 = DIR), as for an A4988/DRV8825
- *     * "rotors step <n> [fwd|rev] verify [seconds]" additionally samples the
+ *     * "stepmotor <n> [fwd|rev] verify [seconds]" additionally samples the
  *       motor coil-current feedback on PA0 (ADC1_IN0 — the shunt/INA sense
  *       amplifier) while stepping, printing the peak-to-peak swing every
  *       `seconds` (default 1s) and stopping with STEP FAULT if the current
@@ -63,7 +63,19 @@
 #define STEP_PORT GPIOC
 #define STEP_PIN GPIO_PIN_10
 #define DIR_PIN GPIO_PIN_11
-#define STEP_HALF_PERIOD_MS 1U /* 1ms high + 1ms low -> ~500 steps/s */
+/* Step pulse timing lives in motor_health.h (STEP_HIGH_US / STEP_PERIOD_US /
+ * STEP_LOW_BUDGET_US) so the firmware and the host timing test share one source.
+ *
+ * We busy-wait on the DWT cycle counter (delay_us), not HAL_Delay: HAL_Delay's 1ms
+ * tick granularity is too coarse — HAL_Delay(1) actually blocks 1-2 ticks, so two
+ * per step ran the motor at only ~250 steps/s (half the intended rate).
+ *
+ * The pulse period is held *strictly* constant regardless of the verify work: the
+ * STEP pin is high for STEP_HIGH_US, then the coil-current sampling / bookkeeping
+ * runs during the low phase, and we pad the low phase so the whole step always
+ * lasts STEP_PERIOD_US. As long as the verify work fits STEP_LOW_BUDGET_US the pulse
+ * train stays clean even at a very short verify interval; anything that doesn't fit
+ * is counted as an overrun so a test can catch it instead of the pulses slipping. */
 #define STEP_MAX_COUNT 100000U
 
 /* PWM feedback monitor.  We measure the PWM on PA0 (TIM2_CH1) using the timer's
@@ -73,7 +85,7 @@
 #define PWM_MON_MAX_SEC 3600U
 #define PWM_MEAS_WINDOW_MS 400U /* no edge within this window = signal lost */
 #define PWM_TIM_HZ 1000000U     /* timer timebase: 1 MHz -> 1 tick = 1 us */
-/* "rotors step <n> ... verify [ms]" samples the coil-current feedback on PA0 to
+/* "stepmotor <n> ... verify [ms]" samples the coil-current feedback on PA0 to
  * check the motor is actually turning while we drive STEP. The optional argument
  * is the check interval in MILLISECONDS (default 1000): each interval the coil
  * swing is evaluated and a fault stops the move, so a sub-second value catches a
@@ -176,8 +188,29 @@ static void print_help(void);
 static void print_status(void);
 static void set_rotors(GPIO_PinState state);
 static uint32_t parse_u32_default(const char *s, uint32_t defval);
-static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t verify_ms, int *motor_fault);
-static void handle_rotor_step(const char *args);
+static void cycle_counter_init(void);
+static void delay_us(uint32_t us);
+static uint32_t cyc_to_us(uint32_t cycles);
+
+/* Pulse-timing instrumentation filled in by stepmotor_move so a fault/summary (and
+ * the HIL test) can prove the verify work never disturbs the STEP pulse train:
+ *  - budget_us: microseconds the in-line verify work must fit within each step
+ *    (the low phase, STEP_PERIOD_US - STEP_HIGH_US).
+ *  - worst_verify_us: longest per-step verify work actually measured (excludes the
+ *    throttled human-readable status print, which is an intentional rare stall).
+ *  - overruns: steps whose verify work exceeded budget_us (0 == pulses stayed clean).
+ *  - stalls: steps that blocked on a throttled status print (bounded, ~1/s). */
+typedef struct
+{
+    uint32_t budget_us;
+    uint32_t worst_verify_us;
+    uint32_t overruns;
+    uint32_t stalls;
+} step_timing_t;
+
+static uint32_t stepmotor_move(uint32_t steps, int reverse, int verify, uint32_t verify_ms,
+                               int *motor_fault, step_timing_t *timing);
+static void handle_stepmotor(const char *args);
 static void pwm_input_init(void);
 static void pwm_input_deinit(void);
 static int pwm_measure(uint32_t *freq_hz, uint32_t *duty_pct, uint32_t *period_us);
@@ -242,6 +275,7 @@ int main(void)
 
     MX_GPIO_Init();
     USART1_Init();
+    cycle_counter_init(); /* DWT cycle counter for accurate step-pulse timing */
     (void)setvbuf(stdout, NULL, _IONBF, 0);
 
     memset(&g_sensor, 0, sizeof(g_sensor));
@@ -399,9 +433,9 @@ static void process_command(char *cmd)
         set_rotors(GPIO_PIN_RESET);
         printf("ROTORS=OFF (PC10=OFF, PC11=OFF)\r\n");
     }
-    else if (strncmp(cmd, "rotors step", 11) == 0 && (cmd[11] == '\0' || cmd[11] == ' '))
+    else if (strncmp(cmd, "stepmotor", 9) == 0 && (cmd[9] == '\0' || cmd[9] == ' '))
     {
-        handle_rotor_step(cmd + 11);
+        handle_stepmotor(cmd + 9);
     }
     else if (strcmp(cmd, "monitor i2c") == 0)
     {
@@ -465,7 +499,7 @@ static void print_help(void)
     printf("  status\r\n");
     printf("  rotors on\r\n");
     printf("  rotors off\r\n");
-    printf("  rotors step <n> [fwd|rev] [verify [ms]]  (PC10=STEP pulses, PC11=DIR; ~500 steps/s;\r\n");
+    printf("  stepmotor <n> [fwd|rev] [verify [ms]]  (PC10=STEP pulses, PC11=DIR; ~500 steps/s;\r\n");
     printf("                          verify samples coil current on PA0 (ADC1_IN0) while stepping, checking\r\n");
     printf("                          the peak-to-peak swing every `ms` (default 1000, min 50; status printed\r\n");
     printf("                          at most once/s) and stopping with STEP FAULT if the current goes flat\r\n");
@@ -568,6 +602,34 @@ static uint32_t parse_u32_default(const char *s, uint32_t defval)
     return v;
 }
 
+/* Enable the Cortex-M4 DWT cycle counter so delay_us() can busy-wait with
+ * sub-millisecond accuracy (HAL_Delay only resolves whole 1ms ticks). */
+static void cycle_counter_init(void)
+{
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0U;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+}
+
+/* Busy-wait `us` microseconds using the DWT cycle counter. Wraparound is handled
+ * naturally by unsigned subtraction. Used for the step pulse timing so the motor
+ * runs at the intended rate instead of HAL_Delay's coarse 1-2ms-per-call floor. */
+static void delay_us(uint32_t us)
+{
+    uint32_t start = DWT->CYCCNT;
+    uint32_t ticks = us * (SystemCoreClock / 1000000U);
+    while ((DWT->CYCCNT - start) < ticks)
+    {
+        /* spin */
+    }
+}
+
+/* Convert a DWT cycle delta to microseconds (integer, truncating). */
+static uint32_t cyc_to_us(uint32_t cycles)
+{
+    return cycles / (SystemCoreClock / 1000000U);
+}
+
 /* Drive PC10 (STEP) with `steps` pulses; PC11 (DIR) selects direction.
  * Returns the number of steps actually issued (a key press aborts early).
  *
@@ -583,12 +645,20 @@ static uint32_t parse_u32_default(const char *s, uint32_t defval)
  * move (sets *motor_fault, returns early). A flat reading before the first swing
  * just means the motor hasn't spun up yet, so we keep checking the next
  * intervals rather than faulting on a slow start. */
-static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t verify_ms, int *motor_fault)
+static uint32_t stepmotor_move(uint32_t steps, int reverse, int verify, uint32_t verify_ms,
+                               int *motor_fault, step_timing_t *timing)
 {
     if (motor_fault != NULL)
     {
         *motor_fault = 0;
     }
+
+    /* The verify work (ADC sample + interval bookkeeping) shares each step with the
+     * pulse: it runs in the low phase and must fit this budget or the pulse slips. */
+    const uint32_t budget_us = STEP_LOW_BUDGET_US;
+    uint32_t worst_verify_us = 0U;
+    uint32_t overruns = 0U;
+    uint32_t stalls = 0U;
 
     HAL_GPIO_WritePin(STEP_PORT, DIR_PIN, reverse ? GPIO_PIN_SET : GPIO_PIN_RESET);
     HAL_Delay(1); /* let DIR settle before the first STEP edge */
@@ -610,14 +680,19 @@ static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t ver
         {
             break; /* any key aborts a long move */
         }
+
+        /* Strict-period step: high for STEP_HIGH_US, then all verify work in the low
+         * phase, then pad the low phase so the whole step lasts STEP_PERIOD_US. */
+        uint32_t step_start = DWT->CYCCNT;
         HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, GPIO_PIN_SET);
-        HAL_Delay(STEP_HALF_PERIOD_MS);
+        delay_us(STEP_HIGH_US);
         HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, GPIO_PIN_RESET);
-        HAL_Delay(STEP_HALF_PERIOD_MS);
         done++;
 
+        int printed = 0; /* a blocking status line was emitted this step (rare stall) */
         if (verify)
         {
+            uint32_t work_start = DWT->CYCCNT;
             uint16_t s = adc_sample(); /* coil-current sense on PA0 for this step */
             if (s < adc_min)
             {
@@ -629,79 +704,113 @@ static uint32_t rotor_step(uint32_t steps, int reverse, int verify, uint32_t ver
             }
 
             uint32_t now = HAL_GetTick();
-            if ((int32_t)(now - next_verify_ms) >= 0)
+            int interval = (int32_t)(now - next_verify_ms) >= 0;
+            uint32_t min_mv = 0U, max_mv = 0U, vpp_mv = 0U;
+            int fault = 0;
+            int seen_fault = 0;
+            int want_print = 0;
+            if (interval)
             {
                 cycle++;
-                uint32_t min_mv = adc_counts_to_mv(adc_min);
-                uint32_t max_mv = adc_counts_to_mv(adc_max);
-                uint32_t vpp_mv = motor_swing_vpp_mv(adc_min, adc_max);
-                if (motor_swing_is_fault(adc_min, adc_max))
+                min_mv = adc_counts_to_mv(adc_min);
+                max_mv = adc_counts_to_mv(adc_max);
+                vpp_mv = motor_swing_vpp_mv(adc_min, adc_max);
+                fault = motor_swing_is_fault(adc_min, adc_max);
+                seen_fault = fault && motor_seen; /* running then flat -> real fault */
+                if (!fault)
                 {
-                    if (!motor_seen)
+                    motor_seen = 1; /* latch that we've seen the motor running */
+                }
+                /* A fault always prints; otherwise throttle to one line per interval-second. */
+                want_print = seen_fault ||
+                             ((int32_t)(now - last_print_ms) >= (int32_t)STEP_VERIFY_PRINT_MIN_MS);
+            }
+
+            /* Record the verify-work time BEFORE the (blocking) status print so the
+             * measured cost is just the every-step work, not the rare human print. */
+            uint32_t verify_us = cyc_to_us(DWT->CYCCNT - work_start);
+            if (verify_us > worst_verify_us)
+            {
+                worst_verify_us = verify_us;
+            }
+            if (verify_us > budget_us)
+            {
+                overruns++;
+            }
+
+            if (interval)
+            {
+                if (want_print)
+                {
+                    if (seen_fault)
                     {
-                        /* Motor hasn't spun up yet — a flat reading before the first
-                         * swing is a slow start, not a fault. Keep checking (throttled),
-                         * the coil current may come on in a later interval. */
-                        if ((int32_t)(now - last_print_ms) >= (int32_t)STEP_VERIFY_PRINT_MIN_MS)
-                        {
-                            printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu waiting: coil current still flat on PA0, Vpp=%lu mV < %u mV (motor not spinning yet)\r\n",
-                                   (unsigned long)cycle,
-                                   (unsigned long)now,
-                                   (unsigned long)done,
-                                   (unsigned long)steps,
-                                   (unsigned long)vpp_mv,
-                                   (unsigned int)MOTOR_SWING_MIN_MV);
-                            last_print_ms = now;
-                        }
-                        adc_min = 0xFFFFU; /* reset the window for the next interval */
-                        adc_max = 0U;
-                        next_verify_ms += verify_ms;
-                        continue;
+                        printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu failure detected: coil current went flat on PA0, Vpp=%lu mV < %u mV (motor stalled / open coil)\r\n",
+                               (unsigned long)cycle, (unsigned long)now, (unsigned long)done,
+                               (unsigned long)steps, (unsigned long)vpp_mv,
+                               (unsigned int)MOTOR_SWING_MIN_MV);
                     }
-                    /* Motor was seen running and has now gone flat: real fault.
-                     * Always print (and stop the move), regardless of throttle. */
-                    printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu failure detected: coil current went flat on PA0, Vpp=%lu mV < %u mV (motor stalled / open coil)\r\n",
-                           (unsigned long)cycle,
-                           (unsigned long)now,
-                           (unsigned long)done,
-                           (unsigned long)steps,
-                           (unsigned long)vpp_mv,
-                           (unsigned int)MOTOR_SWING_MIN_MV);
+                    else if (fault)
+                    {
+                        printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu waiting: coil current still flat on PA0, Vpp=%lu mV < %u mV (motor not spinning yet)\r\n",
+                               (unsigned long)cycle, (unsigned long)now, (unsigned long)done,
+                               (unsigned long)steps, (unsigned long)vpp_mv,
+                               (unsigned int)MOTOR_SWING_MIN_MV);
+                    }
+                    else
+                    {
+                        printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu motor ok: coil Vpp=%lu mV (min=%lu mV max=%lu mV)\r\n",
+                               (unsigned long)cycle, (unsigned long)now, (unsigned long)done,
+                               (unsigned long)steps, (unsigned long)vpp_mv,
+                               (unsigned long)min_mv, (unsigned long)max_mv);
+                    }
+                    last_print_ms = now;
+                    printed = 1;
+                    stalls++;
+                }
+                adc_min = 0xFFFFU; /* reset the window for the next interval */
+                adc_max = 0U;
+                next_verify_ms += verify_ms;
+
+                if (seen_fault)
+                {
                     if (motor_fault != NULL)
                     {
                         *motor_fault = 1;
                     }
                     break; /* stop the move the moment the coil current goes flat */
                 }
-                /* Healthy swing: latch that we've seen the motor running, then
-                 * throttle status to one line per STEP_VERIFY_PRINT_MIN_MS. */
-                motor_seen = 1;
-                if ((int32_t)(now - last_print_ms) >= (int32_t)STEP_VERIFY_PRINT_MIN_MS)
-                {
-                    printf("  verify cycle=%lu tick=%lu ms step=%lu/%lu motor ok: coil Vpp=%lu mV (min=%lu mV max=%lu mV)\r\n",
-                           (unsigned long)cycle,
-                           (unsigned long)now,
-                           (unsigned long)done,
-                           (unsigned long)steps,
-                           (unsigned long)vpp_mv,
-                           (unsigned long)min_mv,
-                           (unsigned long)max_mv);
-                    last_print_ms = now;
-                }
-                adc_min = 0xFFFFU; /* reset the window for the next interval */
-                adc_max = 0U;
-                next_verify_ms += verify_ms;
             }
         }
+
+        /* Pad the low phase to hold the strict period. Skipped after a status print:
+         * that line blocks longer than a whole step, so we take the one-off stall
+         * (counted above) and resume on the next step rather than trying to catch up. */
+        if (!printed)
+        {
+            uint32_t used_us = cyc_to_us(DWT->CYCCNT - step_start);
+            uint32_t pad_us = step_pad_us(STEP_PERIOD_US, used_us, NULL);
+            if (pad_us > 0U)
+            {
+                delay_us(pad_us);
+            }
+        }
+    }
+
+    if (timing != NULL)
+    {
+        timing->budget_us = budget_us;
+        timing->worst_verify_us = worst_verify_us;
+        timing->overruns = overruns;
+        timing->stalls = stalls;
     }
     return done;
 }
 
-/* "rotors step <n> [fwd|rev] [verify [ms]]" — args points just past "rotors step".
+/* "stepmotor <n> [fwd|rev] [verify [ms]]" — args points just past "stepmotor".
  * After the count the direction and the verify option may appear in any order;
- * "verify" turns on the coil-current check (see rotor_step), with an optional check
- * interval in milliseconds. */
-static void handle_rotor_step(const char *args)
+ * "verify" turns on the coil-current check (see stepmotor_move), with an optional
+ * check interval in milliseconds. */
+static void handle_stepmotor(const char *args)
 {
     while (*args == ' ')
     {
@@ -709,7 +818,7 @@ static void handle_rotor_step(const char *args)
     }
     if (*args < '0' || *args > '9')
     {
-        printf("usage: rotors step <n> [fwd|rev] [verify [ms]]\r\n");
+        printf("usage: stepmotor <n> [fwd|rev] [verify [ms]]\r\n");
         return;
     }
 
@@ -800,7 +909,7 @@ static void handle_rotor_step(const char *args)
            (unsigned long)steps,
            reverse ? "rev" : "fwd",
            reverse ? "HIGH" : "LOW",
-           (unsigned int)(1000U / (2U * STEP_HALF_PERIOD_MS)));
+           (unsigned int)(1000000U / STEP_PERIOD_US));
 
     if (verify)
     {
@@ -813,11 +922,23 @@ static void handle_rotor_step(const char *args)
     }
 
     int motor_fault = 0;
-    uint32_t done = rotor_step(steps, reverse, verify, verify_ms, &motor_fault);
+    step_timing_t timing = {0};
+    uint32_t done = stepmotor_move(steps, reverse, verify, verify_ms, &motor_fault, &timing);
 
     if (verify)
     {
         adc_input_deinit();
+        /* Prove the in-line coil-current verify never disturbed the pulse train:
+         * overruns=0 means every step's verify work fit inside the low-phase budget,
+         * so the STEP period stayed strict even at a very short verify interval. */
+        printf("STEP timing: period=%u us (%u steps/s), verify-work worst=%lu us / budget=%lu us, "
+               "overruns=%lu, status-print stalls=%lu\r\n",
+               (unsigned int)STEP_PERIOD_US,
+               (unsigned int)(1000000U / STEP_PERIOD_US),
+               (unsigned long)timing.worst_verify_us,
+               (unsigned long)timing.budget_us,
+               (unsigned long)timing.overruns,
+               (unsigned long)timing.stalls);
     }
 
     if (motor_fault)
@@ -1026,7 +1147,7 @@ void HAL_TIM_IC_MspDeInit(TIM_HandleTypeDef *htim)
 
 /* Bring up ADC1 on PA0 (ADC1_IN0) for the coil-current sense, single software-
  * triggered 12-bit conversions. PA0 is shared with the TIM2 PWM monitor above;
- * "rotors step ... verify" uses this ADC path, "monitor pwm" uses the timer path,
+ * "stepmotor ... verify" uses this ADC path, "monitor pwm" uses the timer path,
  * and each configures/tears down PA0 on entry/exit so they never collide. */
 static void adc_input_init(void)
 {

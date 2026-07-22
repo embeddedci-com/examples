@@ -19,6 +19,7 @@ The pod has no dedicated SWD/UART pins; any DUT signal can be on any of the 12 L
 """
 
 import os
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -146,10 +147,10 @@ def test_scenario_boots_over_cloud(dut, wiring, firmware, build_report):
         assert uart.expect("status:", timeout=4), \
             f"DUT console did not answer status; captured:\n{uart.text}"
 
-        # 4) Stepper: "rotors step" pulses PC10 (STEP)/PC11 (DIR). Self-contained (no
+        # 4) Stepper: "stepmotor" pulses PC10 (STEP)/PC11 (DIR). Self-contained (no
         #    external wiring needed) — just assert the move runs to completion.
         uart.drain()
-        uart.write("rotors step 8\r\n")
+        uart.write("stepmotor 8\r\n")
         assert uart.expect("STEP done", timeout=4), \
             f"DUT did not complete stepper move; captured:\n{uart.text}"
 
@@ -167,15 +168,34 @@ def test_scenario_boots_over_cloud(dut, wiring, firmware, build_report):
         assert uart.expect("PWM monitor stopped", timeout=4), \
             f"PWM monitor did not stop on keypress; captured:\n{uart.text}"
 
-        # 6) Stepper with in-line coil-current verify: "rotors step <n> verify" samples the
+        # 6) Stepper with in-line coil-current verify: "stepmotor <n> verify" samples the
         #    motor coil-current sense on PA0 (ADC1_IN0) while stepping. A flat reading is only
         #    a fault once the motor has been seen running; with PA0 idle the coil current never
         #    swings, so the move must keep checking (printing "waiting") and run to completion
         #    (STEP done) rather than faulting on a motor that never spun up. The move is long
         #    enough (~2.4s @ ~500 steps/s) to cross the 1s verify interval at least twice.
         uart.drain()
-        uart.write("rotors step 1200 verify\r\n")
+        uart.write("stepmotor 1200 verify\r\n")
         assert uart.expect("waiting: coil current still flat", timeout=8), \
             f"stepper verify did not wait on flat coil current; captured:\n{uart.text}"
         assert uart.expect("STEP done", timeout=8), \
             f"stepper verify wrongly faulted on a never-running motor; captured:\n{uart.text}"
+
+        # 7) Pulse-timing under heavy verify: the in-line coil-current check must not steal
+        #    time from the STEP pulse train. The firmware holds a strict step period and
+        #    absorbs the per-step ADC sample + bookkeeping into the low phase; any step whose
+        #    verify work spills past the low-phase budget is counted as an "overrun". Run the
+        #    most aggressive valid verify interval (50 ms floor -> bookkeeping every ~25 steps,
+        #    plus an ADC sample on *every* step) and assert the firmware reports zero overruns,
+        #    i.e. the pulses stayed strictly timed while verifying a lot.
+        uart.drain()
+        uart.write("stepmotor 1500 fwd verify 50\r\n")
+        timing_re = re.compile(r"STEP timing:.*overruns=(\d+),\s*status-print stalls=(\d+)")
+        m = uart.expect(timing_re, timeout=8)  # raises UartTimeout if never printed
+        overruns, stalls = int(m.group(1)), int(m.group(2))
+        assert overruns == 0, (
+            f"stepper verify disturbed the pulse timing: {overruns} step(s) overran the "
+            f"low-phase budget (stalls={stalls}); captured:\n{uart.text}"
+        )
+        assert uart.expect("STEP done", timeout=8), \
+            f"stepmotor timing run did not complete; captured:\n{uart.text}"
