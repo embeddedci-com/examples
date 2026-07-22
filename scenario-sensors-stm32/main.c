@@ -5,12 +5,13 @@
  *     * "rotors on/off" energises both pins (legacy rotor behaviour)
  *     * "stepmotor <n> [fwd|rev]" drives them as a step/direction stepper
  *       interface (PC10 = STEP pulse, PC11 = DIR), as for an A4988/DRV8825
- *     * "stepmotor <n> [fwd|rev] verify [seconds]" additionally samples the
+ *     * "stepmotor <n> [fwd|rev] verify [ms] [log]" additionally samples the
  *       motor coil-current feedback on PA0 (ADC1_IN0 — the shunt/INA sense
- *       amplifier) while stepping, printing the peak-to-peak swing every
- *       `seconds` (default 1s) and stopping with STEP FAULT if the current
- *       goes flat *after* the motor has been seen running (a slow start keeps
- *       checking; motor stalled / open coil / driver dead)
+ *       amplifier) while stepping, checking the peak-to-peak swing every `ms`
+ *       (default 100) and stopping with STEP FAULT if the current goes flat
+ *       *after* the motor has been seen running (a slow start keeps checking;
+ *       motor stalled / open coil / driver dead). Per-cycle status is silent
+ *       unless "log" is passed; the fault is always reported.
  * - stepper health monitor: "monitor pwm [seconds]" measures a PWM feedback
  *   signal on PA0 (TIM2_CH1) each cycle and flags "failure detected" if the
  *   PWM stops after it has been seen (a slow start keeps waiting)
@@ -87,11 +88,11 @@
 #define PWM_TIM_HZ 1000000U     /* timer timebase: 1 MHz -> 1 tick = 1 us */
 /* "stepmotor <n> ... verify [ms]" samples the coil-current feedback on PA0 to
  * check the motor is actually turning while we drive STEP. The optional argument
- * is the check interval in MILLISECONDS (default 1000): each interval the coil
- * swing is evaluated and a fault stops the move, so a sub-second value catches a
+ * is the check interval in MILLISECONDS (default 100): each interval the coil
+ * swing is evaluated and a fault stops the move, so a shorter value catches a
  * fault faster. The floor spans several electrical cycles of the stepper so a
  * window always contains a full swing (at ~500 steps/s one cycle is ~8 ms). */
-#define STEP_VERIFY_DEFAULT_MS 1000U
+#define STEP_VERIFY_DEFAULT_MS 100U
 #define STEP_VERIFY_MIN_MS 50U
 #define STEP_VERIFY_MAX_MS 3600000U
 /* Healthy "motor ok" lines are throttled to at most one per this interval so a
@@ -209,7 +210,7 @@ typedef struct
 } step_timing_t;
 
 static uint32_t stepmotor_move(uint32_t steps, int reverse, int verify, uint32_t verify_ms,
-                               int *motor_fault, step_timing_t *timing);
+                               int verbose, int *motor_fault, step_timing_t *timing);
 static void handle_stepmotor(const char *args);
 static void pwm_input_init(void);
 static void pwm_input_deinit(void);
@@ -499,12 +500,12 @@ static void print_help(void)
     printf("  status\r\n");
     printf("  rotors on\r\n");
     printf("  rotors off\r\n");
-    printf("  stepmotor <n> [fwd|rev] [verify [ms]]  (PC10=STEP pulses, PC11=DIR; ~500 steps/s;\r\n");
+    printf("  stepmotor <n> [fwd|rev] [verify [ms]] [log]  (PC10=STEP pulses, PC11=DIR; ~500 steps/s;\r\n");
     printf("                          verify samples coil current on PA0 (ADC1_IN0) while stepping, checking\r\n");
-    printf("                          the peak-to-peak swing every `ms` (default 1000, min 50; status printed\r\n");
-    printf("                          at most once/s) and stopping with STEP FAULT if the current goes flat\r\n");
-    printf("                          *after* the motor has been seen running (slow start keeps checking);\r\n");
-    printf("                          any key aborts)\r\n");
+    printf("                          the peak-to-peak swing every `ms` (default 100, min 50) and stopping\r\n");
+    printf("                          with STEP FAULT if the current goes flat *after* the motor has been\r\n");
+    printf("                          seen running (slow start keeps checking). Per-cycle status is silent\r\n");
+    printf("                          unless 'log' is given; a fault always prints. Any key aborts.)\r\n");
     printf("  monitor i2c   (reads BMP280 every 1s, press any key to stop)\r\n");
     printf("  monitor pwm [seconds]  (measure PWM on PA0/TIM2_CH1 each cycle; default 5s;\r\n");
     printf("                          'failure detected' only after the PWM has been seen (slow start\r\n");
@@ -646,7 +647,7 @@ static uint32_t cyc_to_us(uint32_t cycles)
  * just means the motor hasn't spun up yet, so we keep checking the next
  * intervals rather than faulting on a slow start. */
 static uint32_t stepmotor_move(uint32_t steps, int reverse, int verify, uint32_t verify_ms,
-                               int *motor_fault, step_timing_t *timing)
+                               int verbose, int *motor_fault, step_timing_t *timing)
 {
     if (motor_fault != NULL)
     {
@@ -721,9 +722,12 @@ static uint32_t stepmotor_move(uint32_t steps, int reverse, int verify, uint32_t
                 {
                     motor_seen = 1; /* latch that we've seen the motor running */
                 }
-                /* A fault always prints; otherwise throttle to one line per interval-second. */
+                /* A fault always prints. The periodic waiting/ok status is debug output,
+                 * emitted only when `verbose` (the "log" option) is set, and even then
+                 * throttled to one line per STEP_VERIFY_PRINT_MIN_MS. */
                 want_print = seen_fault ||
-                             ((int32_t)(now - last_print_ms) >= (int32_t)STEP_VERIFY_PRINT_MIN_MS);
+                             (verbose &&
+                              (int32_t)(now - last_print_ms) >= (int32_t)STEP_VERIFY_PRINT_MIN_MS);
             }
 
             /* Record the verify-work time BEFORE the (blocking) status print so the
@@ -806,10 +810,11 @@ static uint32_t stepmotor_move(uint32_t steps, int reverse, int verify, uint32_t
     return done;
 }
 
-/* "stepmotor <n> [fwd|rev] [verify [ms]]" — args points just past "stepmotor".
- * After the count the direction and the verify option may appear in any order;
+/* "stepmotor <n> [fwd|rev] [verify [ms]] [log]" — args points just past "stepmotor".
+ * After the count the direction, the verify option and "log" may appear in any order.
  * "verify" turns on the coil-current check (see stepmotor_move), with an optional
- * check interval in milliseconds. */
+ * check interval in milliseconds. "log" enables the periodic waiting/ok status lines
+ * (off by default — a fault is always reported regardless). */
 static void handle_stepmotor(const char *args)
 {
     while (*args == ' ')
@@ -818,7 +823,7 @@ static void handle_stepmotor(const char *args)
     }
     if (*args < '0' || *args > '9')
     {
-        printf("usage: stepmotor <n> [fwd|rev] [verify [ms]]\r\n");
+        printf("usage: stepmotor <n> [fwd|rev] [verify [ms]] [log]\r\n");
         return;
     }
 
@@ -836,9 +841,10 @@ static void handle_stepmotor(const char *args)
 
     int reverse = 0;
     int verify = 0;
+    int verbose = 0;
     uint32_t verify_ms = STEP_VERIFY_DEFAULT_MS;
 
-    /* Optional trailing tokens: fwd|rev and verify [ms], in any order. */
+    /* Optional trailing tokens: fwd|rev, verify [ms] and log, in any order. */
     while (1)
     {
         while (*p == ' ')
@@ -857,6 +863,10 @@ static void handle_stepmotor(const char *args)
         else if (c == 'f' || c == 'F')
         {
             reverse = 0;
+        }
+        else if (c == 'l' || c == 'L')
+        {
+            verbose = 1; /* "log": emit the periodic verify status lines */
         }
         else if (c == 'v' || c == 'V')
         {
@@ -890,7 +900,7 @@ static void handle_stepmotor(const char *args)
         }
         else
         {
-            printf("unknown option '%s' (use fwd|rev, verify [ms])\r\n", p);
+            printf("unknown option '%s' (use fwd|rev, verify [ms], log)\r\n", p);
             return;
         }
         while (*p != '\0' && *p != ' ') /* advance past fwd|rev token */
@@ -913,32 +923,36 @@ static void handle_stepmotor(const char *args)
 
     if (verify)
     {
-        printf("STEP verify: watching coil current on PA0 (ADC1_IN0) every %lu ms "
-               "(status printed <=1/s); failure = swing drops below %u mV *after* the "
-               "motor has been seen running (a slow start keeps checking; any key aborts)\r\n",
+        printf("STEP verify: watching coil current on PA0 (ADC1_IN0) every %lu ms; "
+               "failure = swing drops below %u mV *after* the motor has been seen running "
+               "(a slow start keeps checking; any key aborts)%s\r\n",
                (unsigned long)verify_ms,
-               (unsigned int)MOTOR_SWING_MIN_MV);
+               (unsigned int)MOTOR_SWING_MIN_MV,
+               verbose ? "" : " [pass 'log' for per-cycle status]");
         adc_input_init();
     }
 
     int motor_fault = 0;
     step_timing_t timing = {0};
-    uint32_t done = stepmotor_move(steps, reverse, verify, verify_ms, &motor_fault, &timing);
+    uint32_t done = stepmotor_move(steps, reverse, verify, verify_ms, verbose, &motor_fault, &timing);
 
     if (verify)
     {
         adc_input_deinit();
-        /* Prove the in-line coil-current verify never disturbed the pulse train:
-         * overruns=0 means every step's verify work fit inside the low-phase budget,
-         * so the STEP period stayed strict even at a very short verify interval. */
-        printf("STEP timing: period=%u us (%u steps/s), verify-work worst=%lu us / budget=%lu us, "
-               "overruns=%lu, status-print stalls=%lu\r\n",
-               (unsigned int)STEP_PERIOD_US,
-               (unsigned int)(1000000U / STEP_PERIOD_US),
-               (unsigned long)timing.worst_verify_us,
-               (unsigned long)timing.budget_us,
-               (unsigned long)timing.overruns,
-               (unsigned long)timing.stalls);
+        /* Timing summary is debug output: only with "log". overruns=0 proves every
+         * step's verify work fit inside the low-phase budget, so the STEP period
+         * stayed strict even at a very short verify interval. */
+        if (verbose)
+        {
+            printf("STEP timing: period=%u us (%u steps/s), verify-work worst=%lu us / budget=%lu us, "
+                   "overruns=%lu, status-print stalls=%lu\r\n",
+                   (unsigned int)STEP_PERIOD_US,
+                   (unsigned int)(1000000U / STEP_PERIOD_US),
+                   (unsigned long)timing.worst_verify_us,
+                   (unsigned long)timing.budget_us,
+                   (unsigned long)timing.overruns,
+                   (unsigned long)timing.stalls);
+        }
     }
 
     if (motor_fault)
