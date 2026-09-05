@@ -10,8 +10,8 @@ name: Scenario sensors (cloud HIL)
 #
 # Two paths, split so the hardware bench is only touched on demand:
 #   * build (always, on every push): compile the firmware and record it as a GitHub-sourced build on
-#     embeddedci.com (artifacts uploaded via the device-free `test_report_build`), so the freshly
-#     built firmware is always available to flash from the web UI.
+#     embeddedci.com (artifacts uploaded by the `upload-artifact` action, which needs no device), so
+#     the freshly built firmware is always available to flash from the web UI.
 #   * hil (manual only): rebuild, then flash + drive the DUT on benchpod-v2.0.0. Runs ONLY on a manual
 #     "Run workflow" (workflow_dispatch), never automatically on push.
 on:
@@ -55,23 +55,20 @@ jobs:
       - name: Build scenario-sensors.elf
         run: make -C scenario-sensors-stm32 CUBE_F4="$GITHUB_WORKSPACE/scenario-sensors-stm32/STM32CubeF4"
 
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Install pytest + the embeddedci SDK (cloud extra)
-        run: |
-          pip install pytest \
-            "embeddedci[cloud] @ git+https://github.com/embeddedci-com/embeddedci-python.git@main#subdirectory=packages/embeddedci"
-
       - name: Publish build to embeddedci (no device)
-        # -m artifacts_only selects only the device-free test_report_build, which uploads the firmware
-        # (elf/bin/hex) + flash wiring to embeddedci as a GitHub-sourced build — so it's available to
-        # flash from the web UI. No --benchpod-connection is needed because no device is touched.
-        run: |
-          pytest scenario-sensors-stm32/tests -v -m artifacts_only \
-            --benchpod-firmware="$GITHUB_WORKSPACE/scenario-sensors-stm32/build/scenario-sensors.elf" \
-            --benchpod-build-target=stm32f4
+        # Uploads the firmware (elf/bin/hex) and the flash wiring to embeddedci as a
+        # GitHub-sourced build, so it appears in the web UI's flash dropdown. No device is
+        # touched, so this runs on every push. Auth is this job's OIDC token — hence
+        # `permissions: id-token: write` above and the repo being trusted in the web app.
+        uses: embeddedci-com/embeddedci-github-action/upload-artifact@main
+        with:
+          firmware: scenario-sensors-stm32/build/scenario-sensors.elf
+          build_target: stm32f4
+          openocd_target: target/stm32f4x.cfg
+          swclk: "11"
+          swdio: "12"
+          nreset: "3"
+          efuse: "1"
 
   # --- Manual only: rebuild, then flash + drive the DUT on the physical bench ---
   hil:
