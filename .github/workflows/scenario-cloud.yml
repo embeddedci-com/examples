@@ -60,7 +60,7 @@ jobs:
         # GitHub-sourced build, so it appears in the web UI's flash dropdown. No device is
         # touched, so this runs on every push. Auth is this job's OIDC token — hence
         # `permissions: id-token: write` above and the repo being trusted in the web app.
-        uses: embeddedci-com/embeddedci-github-action/upload-artifact@main
+        uses: embeddedci-com/submit-job-action/upload-artifact@main
         with:
           firmware: scenario-sensors-stm32/build/scenario-sensors.elf
           build_target: stm32f4
