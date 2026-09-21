@@ -12,9 +12,12 @@ pins — it exposes 12 generic LA channels (``pins.pin_1`` .. ``pins.pin_12``) a
 DUT signal can be on any of them. The ``wiring`` fixture below is THIS bench's map;
 edit it to match how your board is wired.
 
-    SWCLK → LA11        SWDIO → LA12        NRESET → LA3
+    SWCLK → LA11        SWDIO → LA12
+    NRESET → the pod's dedicated reset pin (DUT header J1 pin 22), not an LA channel
     UART:  the pod samples the DUT's TX on LA5 and drives the DUT's RX on LA4
     Target power: internal-5V eFuse (``pins.efuse``, set with ``--benchpod-efuse``)
+    LA bank voltage: 3.3 V (the STM32F4 is a 3.3 V part), set once in ``conftest.py`` (change it
+    for a 1V8 board); the pod refuses flash/UART until it is selected.
 """
 
 import os
@@ -51,6 +54,7 @@ def _flash_firmware(dut, wiring, firmware):
     Returns the final FlashResult (inspect ``.ok`` / ``.stderr``). check=False so we can fall back
     to a plain (no-NRST) connect when connect-under-reset doesn't answer: selftest.c doesn't remap
     the SWD pins, so NRST isn't required, and a mis-wired/floating NRST would otherwise block it.
+    ``nreset`` is a flag (NRST wired to the pod's reset pin), not an LA channel.
     """
     result = None
     for attempt in range(FLASH_ATTEMPTS):
@@ -67,7 +71,7 @@ def _flash_firmware(dut, wiring, firmware):
         if not result.ok and result.target_unreachable and wiring.nreset:
             result = dut.flash(
                 file=firmware, target=TARGET_CFG,
-                swclk=wiring.swclk, swdio=wiring.swdio, nreset=None,
+                swclk=wiring.swclk, swdio=wiring.swdio, nreset=False,
                 target_power=wiring.efuse, check=False,
             )
         if result.ok:
@@ -80,12 +84,13 @@ def wiring(pins):
     """How THIS bench is physically wired: DUT signal → BenchPod LA channel.
 
     These are bench-specific; any signal can be on any of the 12 LA channels.
-    (Pull-ups, if you needed them, exist only on LA1-8 — see ``pins.has_pullup``.)
+    (Pull-ups, if you needed them, exist only on LA1-LA6 — LA7/LA8 pull *down*; see
+    ``pins.has_pullup``.)
     """
     return SimpleNamespace(
         swclk=pins.pin_11,    # SWD clock
         swdio=pins.pin_12,    # SWD data
-        nreset=pins.pin_3,    # target NRST (None to skip connect-under-reset)
+        nreset=True,          # NRST wired to the pod's reset pin (J1 pin 22); False if not wired
         uart_rx=pins.pin_5,   # pod samples the DUT's TX here
         uart_tx=pins.pin_4,   # pod drives the DUT's RX here
         efuse=pins.efuse,     # target-power rail

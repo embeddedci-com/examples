@@ -12,12 +12,18 @@ Run against a BenchPod on your LAN (TCP, not the cloud). It:
 Seeing ``APP_OK`` after a DAP flash means the pod actually wrote firmware over the
 SWD wire and the target booted it — i.e. the DAP probe is fully working.
 
-Prereqs: the pod runs the current firmware (DAP + uart proxy), its wifi is on, and
-the STM32 is wired (SWCLK/SWDIO/NRST + UART + power eFuse) per the pins below.
+Prereqs: embeddedci>=2.0, an OpenOCD with the ``cmsis_dap_tcp`` backend (newer than
+0.12.0, e.g. xPack OpenOCD), the pod runs the current firmware (DAP + uart proxy) and
+is on the network, and the STM32 is wired (SWCLK/SWDIO + UART + power eFuse on LA
+channels, NRST on the pod's reset pin, DUT header J1 pin 22) per the options below.
 
     python e2e_local.py [ip]            # default ip: 192.168.1.214
-    python e2e_local.py 192.168.1.50 --swclk 11 --swdio 12 --nreset 3 \
+    python e2e_local.py 192.168.1.50 --swclk 11 --swdio 12 \
         --uart-rx 5 --uart-tx 4 --efuse 1
+    python e2e_local.py 192.168.1.50 --no-nreset   # NRST not wired to the pod
+
+The LA bank voltage is the ``LA_VOLTAGE`` constant at the top of this file — change it for a
+1V8 board.
 """
 from __future__ import annotations
 
@@ -28,6 +34,10 @@ import time
 
 from embeddedci.benchpod import BenchPod
 from embeddedci.benchpod.errors import BenchPodError
+
+# LA I/O-bank voltage selected right after connecting — the pod refuses flash and UART until
+# one is set. It must match the DUT's I/O voltage.
+LA_VOLTAGE = 3.3  # board I/O voltage — change to 1.8 for a 1V8 board
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_ELF = os.path.join(HERE, "build", "selftest.elf")
@@ -42,7 +52,9 @@ def main() -> int:
                     help="OpenOCD target config (selects the flash algorithm)")
     ap.add_argument("--swclk", type=int, default=11)
     ap.add_argument("--swdio", type=int, default=12)
-    ap.add_argument("--nreset", type=int, default=3)
+    ap.add_argument("--no-nreset", dest="nreset", action="store_false",
+                    help="NRST is NOT wired to the pod's reset pin (J1 pin 22): skip "
+                         "connect-under-reset")
     ap.add_argument("--uart-rx", type=int, default=5, help="LA pin the pod samples (DUT TX)")
     ap.add_argument("--uart-tx", type=int, default=4, help="LA pin the pod drives (DUT RX)")
     ap.add_argument("--efuse", type=int, default=1, help="target-power eFuse (1=internal, 2=external)")
@@ -55,19 +67,26 @@ def main() -> int:
         return 2
 
     print(f"== BenchPod end-to-end DAP test @ {args.ip} ==")
-    bp = BenchPod(args.ip, timeout=20.0)
+    try:
+        bp = BenchPod(args.ip, la_voltage=LA_VOLTAGE, timeout=20.0)
+    except BenchPodError as exc:
+        print(f"FAIL: cannot reach the pod ({exc}).\n"
+              f"      Is it powered, on the network, and at {args.ip}?")
+        return 2
+    with bp:
+        return _run(bp, args)
 
-    # 0) Reachability / firmware sanity.
+
+def _run(bp: BenchPod, args: argparse.Namespace) -> int:
+    # 0) Reachability / firmware sanity. status() is a dict on every transport.
     try:
         st = bp.status()
     except BenchPodError as exc:
         print(f"FAIL: cannot reach the pod ({exc}).\n"
-              f"      Is it powered, on wifi, and at {args.ip}?")
+              f"      Is it powered, on the network, and at {args.ip}?")
         return 2
-    if isinstance(st, dict):
-        print(f"   pod status: version={st.get('version')} caps={st.get('caps')}")
-    else:
-        print(f"   pod status: {str(st).strip().splitlines()[0] if str(st).strip() else st!r}")
+    print(f"   pod status: version={st.get('version')} caps={st.get('caps')}")
+    print(f"   LA bank: {bp.get_la_voltage().voltage} V")
 
     # 1) Flash over DAP.
     print(f"-- flashing {os.path.basename(args.firmware)} via CMSIS-DAP "
@@ -86,7 +105,7 @@ def main() -> int:
             print("   under-reset connect failed; retrying without NRST ...")
             res = bp.flash(
                 file=args.firmware, target=args.target,
-                swclk=args.swclk, swdio=args.swdio, nreset=None,
+                swclk=args.swclk, swdio=args.swdio, nreset=False,
                 target_power=args.efuse, check=False,
             )
     except BenchPodError as exc:

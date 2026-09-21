@@ -67,7 +67,7 @@ jobs:
           openocd_target: target/stm32f4x.cfg
           swclk: "11"
           swdio: "12"
-          nreset: "3"
+          nreset: "true"   # NRST wired to the pod's reset pin (DUT header J1 pin 22)
           efuse: "1"
 
   # --- Manual only: rebuild, then flash + drive the DUT on the physical bench ---
@@ -83,7 +83,8 @@ jobs:
           release: "13.2.Rel1"
 
       - name: Install xPack OpenOCD
-        # SWD over remote_bitbang/CMSIS-DAP needs OpenOCD master (post-0.12.0); see selftest-cloud.yml.
+        # The SDK flashes through OpenOCD's CMSIS-DAP TCP backend (cmsis_dap_tcp), which is newer
+        # than OpenOCD 0.12.0 (apt's 0.12.0 lacks it); see selftest-cloud.yml.
         run: |
           V=0.12.0-7
           curl -fsSL "https://github.com/xpack-dev-tools/openocd-xpack/releases/download/v$V/xpack-openocd-$V-linux-x64.tar.gz" \
@@ -106,15 +107,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install pytest + the embeddedci SDK (cloud extra)
-        run: |
-          pip install pytest \
-            "embeddedci[cloud] @ git+https://github.com/embeddedci-com/embeddedci-python.git@main#subdirectory=packages/embeddedci"
+      - name: Install the embeddedci SDK (cloud + pytest extras)
+        # Pinned to the frozen 2.x API; [pytest] pulls in pytest for the plugin.
+        run: pip install "embeddedci[cloud,pytest]>=2.0,<3"
 
       - name: Scenario test on the BenchPod (cloud)
         # Point --benchpod-connection at the device wired to this board (here we use
         # benchpod-v2.0.0; change it to your scenario bench's device name). -m hardware runs only the
         # HIL test, which also records this run (with the real pass/fail) as a build on embeddedci.
+        # The LA bank voltage (3.3 V for the STM32F446) is set in scenario-sensors-stm32/tests/conftest.py.
         run: |
           pytest scenario-sensors-stm32/tests -v -m hardware \
             --benchpod-connection=embeddedci:benchpod-v2.0.0 \

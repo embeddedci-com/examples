@@ -31,10 +31,11 @@ jobs:
           release: "13.2.Rel1"   # official Arm GNU toolchain, pinned + cached across runs
 
       - name: Install xPack OpenOCD
-        # The SDK flashes via OpenOCD's remote_bitbang adapter in SWD mode, which it bridges through
-        # the cloud tunnel to the device. SWD support for remote_bitbang exists only in OpenOCD
-        # *master* (post-0.12.0) — Ubuntu's apt openocd 0.12.0 is jtag_only and fails with
-        # "Can't change session's transport". xPack OpenOCD ships a master snapshot that has it.
+        # OpenOCD runs on the runner: the SDK drives the pod's on-board CMSIS-DAP probe through
+        # OpenOCD's cmsis-dap adapter with its TCP backend (cmsis_dap_tcp), bridged through the
+        # cloud tunnel to the device. That backend is newer than OpenOCD 0.12.0 — Ubuntu's apt
+        # openocd 0.12.0 lacks it (the SDK fails up front with a clear message). xPack OpenOCD
+        # ships a post-0.12.0 master snapshot that has it.
         run: |
           V=0.12.0-7
           curl -fsSL "https://github.com/xpack-dev-tools/openocd-xpack/releases/download/v$V/xpack-openocd-$V-linux-x64.tar.gz" \
@@ -62,13 +63,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install pytest + the embeddedci SDK (cloud extra)
-        # Pinned to git main while testing the cloud fixes (swap back to the PyPI release
-        # `pip install pytest "embeddedci[cloud]"` once a version with them is published).
-        # pytest is NOT a runtime dep of the SDK (it's a pytest *plugin*), so install it explicitly.
-        run: |
-          pip install pytest \
-            "embeddedci[cloud] @ git+https://github.com/embeddedci-com/embeddedci-python.git@main#subdirectory=packages/embeddedci"
+      - name: Install the embeddedci SDK (cloud + pytest extras)
+        # Pinned to the frozen 2.x API. The [pytest] extra pulls in pytest (the SDK is a pytest
+        # *plugin*, pytest is not a runtime dep); [cloud] adds the embeddedci.com transport.
+        run: pip install "embeddedci[cloud,pytest]>=2.0,<3"
 
       - name: Self-test on benchpod-v1.0.0 (cloud)
         # The test requests the `build_report` fixture, so this run is also recorded on
@@ -76,6 +74,7 @@ jobs:
         # pytest pass/fail is captured, reusing the same OIDC token (id-token: write above). The
         # uploaded firmware can then be re-flashed from the BenchPod page in the web UI.
         # --benchpod-build-target labels the build's platform for the flash modal.
+        # The LA bank voltage (3.3 V for the STM32) is set in selftest-stm32/tests/conftest.py.
         run: |
           pytest selftest-stm32/tests -v \
             --benchpod-connection=embeddedci:benchpod-v1.0.0 \

@@ -13,9 +13,12 @@ both surface on the Builds page (tagged "embeddedci" vs "github").
 Wiring (BenchPod logic-analyzer channels → DUT) is THIS bench's map — edit it to match your board.
 The pod has no dedicated SWD/UART pins; any DUT signal can be on any of the 12 LA channels.
 
-    SWCLK → LA11   SWDIO → LA12   NRESET → LA3
+    SWCLK → LA11   SWDIO → LA12
+    NRESET → the pod's dedicated reset pin (DUT header J1 pin 22), not an LA channel
     UART (USART1): pod samples the DUT's TX on LA5, drives the DUT's RX on LA4
     Target power: internal-5V eFuse (``pins.efuse``, set with ``--benchpod-efuse``)
+    LA bank voltage: 3.3 V (STM32F446), set once in ``conftest.py`` (change it for a 1V8 board);
+    the pod refuses flash/UART until it is selected.
 """
 
 import os
@@ -50,7 +53,8 @@ FLASH_ATTEMPTS = 3
 def _flash_firmware(dut, wiring, firmware):
     """Flash with a connect-under-reset → plain-connect fallback, retried up to FLASH_ATTEMPTS.
 
-    Returns the final FlashResult (inspect ``.ok`` / ``.stderr``).
+    Returns the final FlashResult (inspect ``.ok`` / ``.stderr``). ``nreset`` is a flag (NRST wired
+    to the pod's reset pin), not an LA channel.
     """
     result = None
     for attempt in range(FLASH_ATTEMPTS):
@@ -67,7 +71,7 @@ def _flash_firmware(dut, wiring, firmware):
         if not result.ok and result.target_unreachable and wiring.nreset:
             result = dut.flash(
                 file=firmware, target=TARGET_CFG,
-                swclk=wiring.swclk, swdio=wiring.swdio, nreset=None,
+                swclk=wiring.swclk, swdio=wiring.swdio, nreset=False,
                 target_power=wiring.efuse, check=False,
             )
         if result.ok:
@@ -81,7 +85,7 @@ def wiring(pins):
     return SimpleNamespace(
         swclk=pins.pin_11,    # SWD clock
         swdio=pins.pin_12,    # SWD data
-        nreset=pins.pin_3,    # target NRST (None to skip connect-under-reset)
+        nreset=True,          # NRST wired to the pod's reset pin (J1 pin 22); False if not wired
         uart_rx=pins.pin_5,   # pod samples the DUT's TX (USART1 TX) here
         uart_tx=pins.pin_4,   # pod drives the DUT's RX (USART1 RX) here
         efuse=pins.efuse,     # target-power rail
