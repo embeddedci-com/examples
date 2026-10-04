@@ -11,7 +11,7 @@ Bench wiring (edit ``wiring`` below to match yours):
                           termination is switched on by the tests)
     GND              <->  common ground between pod, Nucleo and module
     SWCLK -> LA11, SWDIO -> LA12, NRST -> the pod's reset pin
-    UART (USART1): pod samples the DUT's TX on LA5, drives the DUT's RX on LA4
+    UART (USART1): pod samples the DUT's TX on LA3, drives the DUT's RX on LA4
     Target power: internal-5V eFuse, which also feeds the module through the Nucleo's 5V pin
 
 Run (flashes first when --benchpod-firmware is given, otherwise uses what is on the board):
@@ -43,7 +43,7 @@ def wiring(pins):
         swclk=pins.pin_11,
         swdio=pins.pin_12,
         nreset=True,
-        uart_rx=pins.pin_5,   # pod samples the DUT's TX here
+        uart_rx=pins.pin_3,   # pod samples the DUT's TX here
         uart_tx=pins.pin_4,   # pod drives the DUT's RX here
         efuse=pins.efuse,
     )

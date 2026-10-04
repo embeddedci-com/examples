@@ -36,6 +36,7 @@
 
 #define CAN_TX_TIMEOUT_MS 50U    /* no ACK within this -> abort + report */
 #define CAN_BURST_MAX 1000U
+#define CAN_SERVICE_MAX_FRAMES 8U /* per main-loop pass, so the console stays responsive */
 
 #define CS_PORT GPIOB
 #define CS_PIN GPIO_PIN_6
@@ -274,8 +275,10 @@ static void can_service(void)
         return;
     }
 
+    /* Bounded: a node that never gets ACKed retransmits back to back, and an
+     * unbounded drain would never return to the console. */
     can_frame_t f;
-    while (mcp_receive(&f))
+    for (uint32_t n = 0; n < CAN_SERVICE_MAX_FRAMES && mcp_receive(&f); n++)
     {
         g_can.rx++;
         if (g_can.echo)
