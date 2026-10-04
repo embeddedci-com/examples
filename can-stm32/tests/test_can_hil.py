@@ -269,7 +269,11 @@ def test_termination_switch(benchpod, node, on):
         else:
             node.cmd("can send 151 5A", r"CAN tx fail")
             assert bus.read_until(can_id=0x151, timeout=0.5) is None
-            assert bus.status()["tec"] > 0, "pod frame got through an unterminated bus"
+            # The unACKed frame retransmits until bus-off; the pod then recovers and zeroes TEC,
+            # which a slow (cloud) status read can land after.
+            st = bus.status()
+            assert st["tec"] > 0 or st["bus_off"] or st["bus_off_recoveries"] > 0, \
+                f"pod frame got through an unterminated bus: {st}"
 
 
 BITRATES = [125_000, 250_000, 500_000] + ([1_000_000] if OSC_MHZ == 16 else [])
