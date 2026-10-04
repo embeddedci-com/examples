@@ -6,26 +6,29 @@ over that console and talk to it from the pod's CAN API.
 
 ## Wiring
 
-The module's TJA1050 needs 5 V, which puts its SPI outputs at 5 V. A TXS0108E shifts
-them to the Nucleo's 3.3 V.
+The module runs at 5 V from the Nucleo's 5V pin and is wired straight to the Nucleo.
+PA6 and PC7 are 5 V tolerant, so the module's 5 V outputs are fine. The Nucleo's 3.3 V
+outputs into the MCP2515 sit just under its 0.7 x VDD input threshold, which works in
+practice; `can selftest` checks it. If it is ever flaky, put a TXS0108E in between
+(OE tied to VCCA).
 
-| Nucleo (A side, 3.3 V) | TXS0108E | MCP2515 module (B side, 5 V) |
-|---|---|---|
-| D13 / PA5 (SPI1 SCK) | A1 / B1 | SCK |
-| D12 / PA6 (SPI1 MISO) | A2 / B2 | SO |
-| D11 / PA7 (SPI1 MOSI) | A3 / B3 | SI |
-| D10 / PB6 (CS) | A4 / B4 | CS |
-| D9 / PC7 (INT) | A5 / B5 | INT |
-| 3V3 | VCCA, OE | |
-| 5V | VCCB | VCC |
-| GND | GND | GND |
+| Nucleo | MCP2515 module |
+|---|---|
+| D13 / PA5 (SPI1 SCK) | SCK |
+| D12 / PA6 (SPI1 MISO) | SO |
+| D11 / PA7 (SPI1 MOSI) | SI |
+| D10 / PB6 (CS) | CS |
+| D9 / PC7 (INT) | INT |
+| 5V | VCC |
+| GND | GND |
 
-- Tie **OE to VCCA**, or every channel stays off.
 - Module **H to pod CAN+, L to pod CAN-**, plus a common ground.
-- Fit the module's **120R jumper**. The tests switch on the pod's termination, so the
-  bus reads about 60 ohm between CAN+ and CAN- with both powered.
-- Console: USART1 PA9 (TX) / PA10 (RX), 115200 8N1. SWD and UART go to the pod as in
-  `scenario-sensors-stm32`.
+- Leave the module's **120R jumper off**. The pod's switchable 120R is then the bus's only
+  termination, so the termination test can prove the switch: on, traffic flows; off, the
+  unterminated bus carries nothing. With the jumper fitted, set `CAN_NODE_TERM=1`.
+- The Nucleo's ST-LINK holds the F446 in reset for about 2.2 s after power-up.
+- Console: USART1 PA9 (TX) to pod LA3, PA10 (RX) to pod LA4, 115200 8N1.
+  SWD: SWCLK LA11, SWDIO LA12.
 
 ## Build
 
@@ -69,4 +72,4 @@ Without `--benchpod-firmware` the tests use the firmware already on the board. S
 Covered: both directions with standard and extended ids and 0 to 8 bytes, request/response
 (echo), periodic timing from the pod's timestamps, bursts within and beyond the pod's RX
 ring (overflow accounting), listen mode on either side (no ACK, error counters),
-125k/250k/500k(/1M), and a bitrate mismatch.
+125k/250k/500k(/1M), a bitrate mismatch, and the pod's termination switch.

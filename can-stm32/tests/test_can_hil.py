@@ -7,19 +7,21 @@ driven over its UART console; the pod side uses the SDK's CAN API.
 
 Bench wiring (edit ``wiring`` below to match yours):
 
-    Pod CAN+ / CAN-  <->  MCP2515 module H / L (fit the module's 120R jumper; the pod's
-                          termination is switched on by the tests)
+    Pod CAN+ / CAN-  <->  MCP2515 module H / L (module 120R jumper removed: the pod's switchable
+                          120R is the only termination, so the termination test can see it)
     GND              <->  common ground between pod, Nucleo and module
     SWCLK -> LA11, SWDIO -> LA12, NRST -> the pod's reset pin
     UART (USART1): pod samples the DUT's TX on LA3, drives the DUT's RX on LA4
-    Target power: internal-5V eFuse, which also feeds the module through the Nucleo's 5V pin
+    Target power: internal-5V eFuse, which also feeds the module through the Nucleo's 5V pin.
+    The Nucleo's ST-LINK holds the F446 in reset for ~2.2 s after power-up.
 
 Run (flashes first when --benchpod-firmware is given, otherwise uses what is on the board):
 
     pytest can-stm32/tests -v --benchpod-connection=<host or embeddedci:name> \\
         --benchpod-firmware=can-stm32/build/can-node.elf
 
-Set ``CAN_NODE_OSC_MHZ=16`` for a module with a 16 MHz crystal (also enables the 1 Mbit/s case).
+Set ``CAN_NODE_OSC_MHZ=16`` for a module with a 16 MHz crystal (also enables the 1 Mbit/s case),
+``CAN_NODE_TERM=1`` if the module's 120R jumper is fitted.
 """
 
 import os
@@ -32,6 +34,8 @@ import pytest
 TARGET_CFG = "target/stm32f4x.cfg"
 FLASH_ATTEMPTS = 3
 OSC_MHZ = int(os.environ.get("CAN_NODE_OSC_MHZ", "8"))
+# The module's own 120R jumper fitted? Off on this bench, so the pod's switch is the only termination.
+MODULE_TERM = os.environ.get("CAN_NODE_TERM", "0") == "1"
 BITRATE = 500_000
 POD_RX_RING = 31  # frames the pod buffers between reads (32-slot ring, one kept empty)
 
@@ -241,6 +245,31 @@ def test_pod_tx_without_ack_raises_errors(can, node):
     node.cmd("can mode normal", r"CAN mode normal ok")
     time.sleep(0.3)  # the pod's pending retransmission now gets ACKed
     assert not can.status()["bus_off"]
+
+
+@pytest.mark.hardware
+@pytest.mark.parametrize("on", [True, False, True, False])
+def test_termination_switch(benchpod, node, on):
+    """The pod's switchable 120R is the bus's only termination (module jumper removed):
+    on, traffic flows both ways without errors; off, the unterminated bus carries nothing.
+
+    With the module's 120R fitted (CAN_NODE_TERM=1) the bus works either way, so the test then
+    only checks that switching doesn't disturb it.
+    """
+    node.init(BITRATE)
+    with benchpod.open_can(bitrate=BITRATE, mode="normal", term=on) as bus:
+        assert bus.status()["term"] is on
+        bus.write(0x150, [int(on)])
+        if on or MODULE_TERM:
+            node.expect_rx(0x150, bytes([int(on)]))
+            node.cmd("can send 151 5A", r"CAN tx ok")
+            assert bus.expect(can_id=0x151, timeout=2.0).data == b"\x5A"
+            st = bus.status()
+            assert st["tec"] == 0 and st["rec"] == 0, f"errors with term={on}: {st}"
+        else:
+            node.cmd("can send 151 5A", r"CAN tx fail")
+            assert bus.read_until(can_id=0x151, timeout=0.5) is None
+            assert bus.status()["tec"] > 0, "pod frame got through an unterminated bus"
 
 
 BITRATES = [125_000, 250_000, 500_000] + ([1_000_000] if OSC_MHZ == 16 else [])

@@ -2,15 +2,15 @@
  * STM32 CAN node: NUCLEO-F446RE + MCP2515/TJA1050 module, driven from a UART
  * console so a BenchPod (or a person) can make it talk on the bus.
  *
- * Wiring (Nucleo Arduino header -> TXS0108E A side, B side -> MCP2515 module):
+ * Wiring (Nucleo Arduino header -> MCP2515 module, direct):
  *   D13 PA5  SPI1_SCK  -> SCK
  *   D12 PA6  SPI1_MISO <- SO
  *   D11 PA7  SPI1_MOSI -> SI
  *   D10 PB6  CS        -> CS
  *   D9  PC7  INT       <- INT (active low)
- *   3V3 -> TXS VCCA (and OE), 5V -> TXS VCCB + module VCC, GND common
- * The module's TJA1050 needs 5 V, which makes its SPI outputs 5 V too: the
- * TXS0108E shifts them to the Nucleo's 3.3 V.
+ *   5V -> module VCC, GND common
+ * The module's TJA1050 needs 5 V, which makes its SPI outputs 5 V too; PA6 and
+ * PC7 are 5 V tolerant. A TXS0108E in between is optional (see README).
  *
  * Console: USART1 PA9 (TX) / PA10 (RX), 115200 8N1. Type "help".
  */
