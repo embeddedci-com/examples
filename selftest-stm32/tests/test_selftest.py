@@ -148,7 +148,7 @@ def test_selftest_boots_over_cloud(dut, wiring, firmware, build_report):
         #    capture cannot do). The pod sends "ping\r\n" back-to-back at line rate;
         #    selftest.c's RX is interrupt-driven so it takes the whole burst without
         #    overrunning (a polled RX would drop all but the first byte).
-        uart.drain()
+        uart.read()
         uart.write("ping\r\n")
         assert uart.expect("pong", timeout=4), \
             f"DUT console did not answer ping; captured:\n{uart.text}"

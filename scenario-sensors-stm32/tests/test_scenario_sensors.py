@@ -146,14 +146,14 @@ def test_scenario_boots_over_cloud(dut, wiring, firmware, build_report):
             f"scenario firmware did not report APP_OK; captured:\n{uart.text}"
 
         # 3) Interactive console check on the live stream: "status" prints a status block.
-        uart.drain()
+        uart.read()
         uart.write("status\r\n")
         assert uart.expect("status:", timeout=4), \
             f"DUT console did not answer status; captured:\n{uart.text}"
 
         # 4) Stepper: "stepmotor" pulses PC10 (STEP)/PC11 (DIR). Self-contained (no
         #    external wiring needed) — just assert the move runs to completion.
-        uart.drain()
+        uart.read()
         uart.write("stepmotor 8\r\n")
         assert uart.expect("STEP done", timeout=4), \
             f"DUT did not complete stepper move; captured:\n{uart.text}"
@@ -162,7 +162,7 @@ def test_scenario_boots_over_cloud(dut, wiring, firmware, build_report):
         #    the PWM is never seen, so the monitor treats it as "not started yet" and keeps
         #    waiting rather than faulting on a slow start — it must NOT report "failure
         #    detected" (that fires only after a PWM has been seen and then lost).
-        uart.drain()
+        uart.read()
         uart.write("monitor pwm 1\r\n")
         assert uart.expect("waiting: no PWM on PA0 yet", timeout=6), \
             f"PWM monitor did not wait on an idle pin; captured:\n{uart.text}"
@@ -176,11 +176,11 @@ def test_scenario_boots_over_cloud(dut, wiring, firmware, build_report):
         #    swings, but a flat reading is only a fault once the motor has been seen running,
         #    so the move must run to completion (STEP done) without faulting AND without any
         #    per-cycle status chatter (that only appears with the "log" option).
-        uart.drain()
+        uart.read()
         uart.write("stepmotor 1200 verify\r\n")
         assert uart.expect("STEP done", timeout=8), \
             f"stepper verify wrongly faulted on a never-running motor; captured:\n{uart.text}"
-        seg = uart.drain()
+        seg = uart.read()
         assert "verify cycle=" not in seg, \
             f"per-cycle status must be silent without 'log'; captured:\n{seg}"
         assert "STEP FAULT" not in seg, \
@@ -193,7 +193,7 @@ def test_scenario_boots_over_cloud(dut, wiring, firmware, build_report):
         #    low-phase budget is counted as an "overrun". Run the most aggressive valid interval
         #    (50 ms floor -> bookkeeping every ~25 steps, plus an ADC sample on *every* step) and
         #    assert zero overruns, i.e. the pulses stayed strictly timed while verifying a lot.
-        uart.drain()
+        uart.read()
         uart.write("stepmotor 1500 fwd verify 50 log\r\n")
         assert uart.expect("waiting: coil current still flat", timeout=8), \
             f"'log' run did not emit per-cycle status; captured:\n{uart.text}"

@@ -141,7 +141,7 @@ def _run(bp: BenchPod, args: argparse.Namespace) -> int:
         print("   APP_OK seen ✓")
 
         # 3) Interactive console check on the same live stream.
-        uart.drain()
+        uart.read()
         uart.write("ping\r\n")
         if uart.expect("pong", timeout=4):
             print("   console ping -> pong ✓")
