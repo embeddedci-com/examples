@@ -2,7 +2,7 @@
 
 The pod and the Nucleo are two real nodes on one bus, so this exercises what the pod's
 loopback tests cannot: ACKs from another controller, both directions, periodic traffic,
-bursts, error counters and bitrate changes. The Nucleo runs ``build/can-node.elf`` and is
+bursts, error counters and bitrate changes. The Nucleo runs ``build/process-node.elf`` and is
 driven over its UART console; the pod side uses the SDK's CAN API.
 
 Bench wiring (edit ``wiring`` below to match yours):
@@ -17,8 +17,8 @@ Bench wiring (edit ``wiring`` below to match yours):
 
 Run (flashes first when --benchpod-firmware is given, otherwise uses what is on the board):
 
-    pytest can-stm32/tests -v --benchpod-connection=<host or embeddedci:name> \\
-        --benchpod-firmware=can-stm32/build/can-node.elf
+    pytest process-node-stm32/tests -v --benchpod-connection=<host or embeddedci:name> \\
+        --benchpod-firmware=process-node-stm32/build/process-node.elf
 
 Set ``CAN_NODE_OSC_MHZ=16`` for a module with a 16 MHz crystal (also enables the 1 Mbit/s case),
 ``CAN_NODE_TERM=1`` if the module's 120R jumper is fitted.

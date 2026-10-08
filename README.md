@@ -20,8 +20,8 @@ This repository contains small, focused examples used by EmbeddedCI workflows.
   Bare-metal STM32 example targeting STM32F446 (`arm-none-eabi` toolchain).  
   Produces `.elf`, `.bin`, and `.hex` artifacts using STM32Cube HAL sources.
 
-- `can-stm32`  
-  NUCLEO-F446RE + MCP2515 CAN node with a UART console, plus pytest HIL tests that use it as the second node on the BenchPod's CAN bus.
+- `process-node-stm32`  
+  NUCLEO-F446RE + MCP2515 process-control node (CAN, analog in/out, thermostat loop, alarms) with a UART console, plus pytest HIL tests that run real use cases against the BenchPod.
 
 - `yocto-kas-image`  
   Yocto/KAS manifest example (`kas.yml`) for building a `core-image-minimal` image (BeagleBone machine) with pinned layer revisions.

@@ -1,4 +1,4 @@
-TARGET  := can-node
+TARGET  := process-node
 MCU     := STM32F446xx
 CPU     := cortex-m4
 FPU     := fpv4-sp-d16

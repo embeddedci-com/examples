@@ -1,4 +1,4 @@
-# can-stm32
+# process-node-stm32
 
 A CAN node on a NUCLEO-F446RE with an MCP2515/TJA1050 module, used as the second node
 when testing the BenchPod's CAN port. The Nucleo runs a UART console; the tests drive it
@@ -33,7 +33,7 @@ practice; `can selftest` checks it. If it is ever flaky, put a TXS0108E in betwe
 ## Build
 
 ```bash
-make                         # build/can-node.elf, 8 MHz module crystal
+make                         # build/process-node.elf, 8 MHz module crystal
 make MCP2515_OSC_HZ=16000000 # module with a 16 MHz crystal
 make test-host               # bit-timing unit test, no hardware
 ```
@@ -62,8 +62,8 @@ Received frames print as `CAN rx id=0x123 ext=0 rtr=0 dlc=2 data=0102`.
 ## HIL tests
 
 ```bash
-pytest can-stm32/tests -v --benchpod-connection=<host or embeddedci:name> \
-    --benchpod-firmware=can-stm32/build/can-node.elf
+pytest process-node-stm32/tests -v --benchpod-connection=<host or embeddedci:name> \
+    --benchpod-firmware=process-node-stm32/build/process-node.elf
 ```
 
 Without `--benchpod-firmware` the tests use the firmware already on the board. Set
