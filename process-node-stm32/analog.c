@@ -1,5 +1,6 @@
 #include "analog.h"
 #include "proc.h"
+#include "sine_table.h"
 #include "stm32f4xx_hal.h"
 
 #define AIN_CHANNEL 1U       /* PA1 */
@@ -101,4 +102,125 @@ const ain_state_t *ain_read_now(void)
 const ain_state_t *ain_state(void)
 {
     return &g_ain;
+}
+
+/* ---------------------------------------------------------------- analog out */
+
+#define AOUT_CHANNEL_PIN 4U /* PA4 */
+
+static aout_state_t g_aout;
+static volatile uint32_t g_phase;
+static volatile uint32_t g_phase_inc;
+static volatile int32_t g_amp_code;
+static volatile int32_t g_offset_code;
+
+static uint32_t mv_to_code(uint32_t mv)
+{
+    uint32_t vdda = g_ain.vdda_mv ? g_ain.vdda_mv : PROC_VREFINT_CAL_MV;
+    uint32_t code = (mv * PROC_ADC_FULL_SCALE + vdda / 2U) / vdda;
+    return code > PROC_ADC_FULL_SCALE ? PROC_ADC_FULL_SCALE : code;
+}
+
+static int in_range(uint32_t lo_mv, uint32_t hi_mv)
+{
+    uint32_t vdda = g_ain.vdda_mv ? g_ain.vdda_mv : PROC_VREFINT_CAL_MV;
+    return lo_mv >= AOUT_MIN_MV && hi_mv + AOUT_HEADROOM_MV <= vdda;
+}
+
+static void dac_enable(void)
+{
+    DAC->CR |= DAC_CR_EN1; /* buffered (BOFF1 = 0), no trigger: DHR -> output at once */
+}
+
+static void tim6_stop(void)
+{
+    TIM6->CR1 &= ~TIM_CR1_CEN;
+    TIM6->DIER = 0U;
+    NVIC_DisableIRQ(TIM6_DAC_IRQn);
+}
+
+void aout_init(void)
+{
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    RCC->APB1ENR |= RCC_APB1ENR_DACEN | RCC_APB1ENR_TIM6EN;
+    (void)RCC->APB1ENR;
+
+    GPIOA->PUPDR &= ~(3U << (AOUT_CHANNEL_PIN * 2U));
+    GPIOA->MODER |= 3U << (AOUT_CHANNEL_PIN * 2U); /* analog; high-Z while the DAC is off */
+    DAC->CR = 0U;
+
+    /* TIM6 on APB1 (16 MHz timer clock): update at AOUT_RATE_HZ. */
+    TIM6->PSC = 0U;
+    TIM6->ARR = (16000000U / AOUT_RATE_HZ) - 1U;
+    TIM6->CNT = 0U;
+    NVIC_SetPriority(TIM6_DAC_IRQn, 3);
+    g_aout.mode = AOUT_OFF;
+}
+
+int aout_dc(uint32_t mv)
+{
+    if (!in_range(mv, mv))
+    {
+        return -1;
+    }
+    tim6_stop();
+    g_aout.code = mv_to_code(mv);
+    DAC->DHR12R1 = g_aout.code;
+    dac_enable();
+    g_aout.mode = AOUT_DC;
+    g_aout.mv = mv;
+    g_aout.amp_mv = 0U;
+    g_aout.hz = 0U;
+    return 0;
+}
+
+int aout_sine(uint32_t hz, uint32_t amp_mv, uint32_t offset_mv)
+{
+    if (hz == 0U || hz > AOUT_SINE_MAX_HZ || amp_mv == 0U || amp_mv > offset_mv ||
+        !in_range(offset_mv - amp_mv, offset_mv + amp_mv))
+    {
+        return -1;
+    }
+    tim6_stop();
+    g_offset_code = (int32_t)mv_to_code(offset_mv);
+    g_amp_code = (int32_t)mv_to_code(amp_mv);
+    g_phase = 0U;
+    g_phase_inc = (uint32_t)(((uint64_t)hz << 32) / AOUT_RATE_HZ);
+    DAC->DHR12R1 = (uint32_t)g_offset_code;
+    dac_enable();
+
+    TIM6->CNT = 0U;
+    TIM6->SR = 0U;
+    TIM6->DIER = TIM_DIER_UIE;
+    NVIC_EnableIRQ(TIM6_DAC_IRQn);
+    TIM6->CR1 = TIM_CR1_CEN;
+
+    g_aout.mode = AOUT_SINE;
+    g_aout.mv = offset_mv;
+    g_aout.amp_mv = amp_mv;
+    g_aout.hz = hz;
+    g_aout.code = (uint32_t)g_offset_code;
+    return 0;
+}
+
+void aout_off(void)
+{
+    tim6_stop();
+    DAC->CR &= ~DAC_CR_EN1; /* PA4 back to high-Z */
+    g_aout.mode = AOUT_OFF;
+    g_aout.mv = g_aout.amp_mv = g_aout.hz = g_aout.code = 0U;
+}
+
+const aout_state_t *aout_state(void)
+{
+    return &g_aout;
+}
+
+/* DDS: a 32-bit phase accumulator, the top 8 bits index the sine table. */
+void TIM6_DAC_IRQHandler(void)
+{
+    TIM6->SR = 0U;
+    g_phase += g_phase_inc;
+    int32_t v = g_offset_code + ((g_amp_code * SINE_Q15[g_phase >> 24]) >> 15);
+    DAC->DHR12R1 = (uint32_t)v;
 }

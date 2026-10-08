@@ -36,6 +36,8 @@ def wiring(pins):
         # Analog in: pod 3.3 V DAC SMA -> 10 kOhm -> PA1 (Nucleo A1). PROCESS_NODE_ANALOG=0 on a
         # bench without that lead skips the analog tests instead of failing them.
         ain_path="3v3",
+        # Analog out: PA4 (Nucleo A2) -> pod ADC SMA (adc_ext). Same PROCESS_NODE_ANALOG switch.
+        aout_source="ext",
         analog=os.environ.get("PROCESS_NODE_ANALOG", "1") == "1",
     )
 
@@ -82,6 +84,14 @@ class Node:
         """One fresh analog-input reading: mv, raw, filt_mv, vdda_mv, samples (all ints)."""
         m = self.cmd("ain", r"AIN ([^\r\n]*)\r\n")
         return {k: int(v) for k, v in (kv.split("=", 1) for kv in m.group(1).split())}
+
+    def aout(self, args=""):
+        """Run ``aout <args>`` and return its reply as a dict (``mode`` plus numbers), or raise
+        AssertionError with the node's error line."""
+        m = self.cmd(f"aout {args}".strip(), r"AOUT ([^\r\n]*)\r\n")
+        body = m.group(1)
+        assert not body.startswith("error"), f"aout {args}: {body}"
+        return {k: (v if k == "mode" else int(v)) for k, v in (kv.split("=", 1) for kv in body.split())}
 
     def status(self):
         m = self.cmd("can status", r"CAN status: ([^\r\n]*)\r\n")

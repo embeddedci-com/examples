@@ -12,7 +12,8 @@
  * The module's TJA1050 needs 5 V, which makes its SPI outputs 5 V too; PA6 and
  * PC7 are 5 V tolerant. A TXS0108E in between is optional (see README).
  *
- * Analog in: PA1 (ADC1_IN1, Nucleo A1) <- pod 3.3 V DAC SMA via 10 kOhm.
+ * Analog in:  PA1 (ADC1_IN1, Nucleo A1) <- pod 3.3 V DAC SMA via 10 kOhm.
+ * Analog out: PA4 (DAC1_OUT1, Nucleo A2) -> pod ADC SMA (off until asked).
  *
  * Console: USART1 PA9 (TX) / PA10 (RX), 115200 8N1. Type "help".
  */
@@ -114,6 +115,7 @@ static void reset_cause_capture(void);
 static void iwdg_start(void);
 static void iwdg_kick(void);
 static void print_info(void);
+static void handle_aout(char *args);
 
 int _write(int file, char *ptr, int len)
 {
@@ -150,6 +152,7 @@ int main(void)
     printf("PROCESS-NODE: uart=USART1(115200), spi=SPI1 PA5/PA6/PA7, cs=PB6, int=PC7\r\n");
     can_init(g_can.bitrate);
     ain_init();
+    aout_init();
     printf("APP_OK\r\n");
     printf("type a command and press Enter (e.g. help)\r\n");
     print_prompt();
@@ -685,6 +688,10 @@ static void process_command(char *cmd)
     {
         print_info();
     }
+    else if (strcmp(cmd, "aout") == 0 || strncmp(cmd, "aout ", 5) == 0)
+    {
+        handle_aout(cmd + 4);
+    }
     else if (strcmp(cmd, "ain") == 0)
     {
         const ain_state_t *a = ain_read_now();
@@ -724,6 +731,7 @@ static void print_help(void)
     printf("commands:\r\n");
     printf("  info                      firmware, version, uptime, reset cause\r\n");
     printf("  ain                       analog input PA1: mV, raw, filtered, VDDA\r\n");
+    printf("  aout [<mV> | sine <Hz> <amp-mV> <offset-mV> | off]   analog output PA4\r\n");
     printf("  status | can status       counters, mode, error state\r\n");
     printf("  can init [bitrate]        reset + configure the MCP2515 (default 500000)\r\n");
     printf("  can osc <MHz>             module crystal (8 or 16), then re-init\r\n");
@@ -739,6 +747,80 @@ static void print_help(void)
     printf("  can regs                  dump MCP2515 registers\r\n");
     printf("  reset                     reboot the MCU\r\n");
     printf("  wdt stall                 hang until the watchdog resets the MCU\r\n");
+}
+
+/* ---------------------------------------------------------------- analog out */
+
+static void print_aout(void)
+{
+    const aout_state_t *a = aout_state();
+    switch (a->mode)
+    {
+    case AOUT_DC:
+        printf("AOUT mode=dc mv=%lu code=%lu\r\n", (unsigned long)a->mv, (unsigned long)a->code);
+        break;
+    case AOUT_SINE:
+        printf("AOUT mode=sine hz=%lu amp_mv=%lu offset_mv=%lu\r\n", (unsigned long)a->hz,
+               (unsigned long)a->amp_mv, (unsigned long)a->mv);
+        break;
+    default:
+        printf("AOUT mode=off\r\n");
+        break;
+    }
+}
+
+static int parse_u32(const char *s, uint32_t *out)
+{
+    char *end;
+    if (s == NULL || *s == '\0')
+    {
+        return -1;
+    }
+    unsigned long v = strtoul(s, &end, 10);
+    if (*end != '\0')
+    {
+        return -1;
+    }
+    *out = (uint32_t)v;
+    return 0;
+}
+
+static void handle_aout(char *args)
+{
+    char *a0 = strtok(args, " ");
+    if (a0 == NULL)
+    {
+        print_aout();
+        return;
+    }
+    if (strcmp(a0, "off") == 0)
+    {
+        aout_off();
+        print_aout();
+        return;
+    }
+    if (strcmp(a0, "sine") == 0)
+    {
+        uint32_t hz, amp, off;
+        if (parse_u32(strtok(NULL, " "), &hz) != 0 || parse_u32(strtok(NULL, " "), &amp) != 0 ||
+            parse_u32(strtok(NULL, " "), &off) != 0 || aout_sine(hz, amp, off) != 0)
+        {
+            printf("AOUT error: usage aout sine <1..%u Hz> <amp-mV> <offset-mV>, swing within "
+                   "%u mV .. VDDA-%u mV\r\n",
+                   (unsigned)AOUT_SINE_MAX_HZ, (unsigned)AOUT_MIN_MV, (unsigned)AOUT_HEADROOM_MV);
+            return;
+        }
+        print_aout();
+        return;
+    }
+    uint32_t mv;
+    if (parse_u32(a0, &mv) != 0 || aout_dc(mv) != 0)
+    {
+        printf("AOUT error: usage aout <mV> (%u .. VDDA-%u) | sine ... | off\r\n",
+               (unsigned)AOUT_MIN_MV, (unsigned)AOUT_HEADROOM_MV);
+        return;
+    }
+    print_aout();
 }
 
 /* ---------------------------------------------------------------- lifecycle */

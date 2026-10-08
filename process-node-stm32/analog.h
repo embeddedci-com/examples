@@ -1,6 +1,9 @@
 /*
- * Analog input of the process node: PA1 (ADC1_IN1, Nucleo A1), the process
- * value. Readings are oversampled and corrected for VDDA through VREFINT.
+ * Analog I/O of the process node.
+ *   in:  PA1 (ADC1_IN1, Nucleo A1), the process value. Oversampled and
+ *        corrected for VDDA through VREFINT.
+ *   out: PA4 (DAC1_OUT1, Nucleo A2), the actuator. Off (high-Z) until asked:
+ *        the pod's ADC SMA it drives is shared with other tests.
  */
 #ifndef ANALOG_H
 #define ANALOG_H
@@ -27,5 +30,33 @@ void ain_tick(uint32_t now_ms);
 /* Take one fresh oversampled reading now (also updates the state). */
 const ain_state_t *ain_read_now(void);
 const ain_state_t *ain_state(void);
+
+#define AOUT_RATE_HZ 10000U  /* waveform update rate (TIM6) */
+#define AOUT_MIN_MV 200U     /* buffered DAC output swing: 0.2 V .. VDDA - 0.2 V */
+#define AOUT_HEADROOM_MV 200U
+#define AOUT_SINE_MAX_HZ 1000U
+
+typedef enum
+{
+    AOUT_OFF = 0,
+    AOUT_DC,
+    AOUT_SINE,
+} aout_mode_t;
+
+typedef struct
+{
+    aout_mode_t mode;
+    uint32_t mv;        /* DC level, or the sine offset */
+    uint32_t amp_mv;    /* sine amplitude (peak) */
+    uint32_t hz;
+    uint32_t code;      /* DC code, or the offset code */
+} aout_state_t;
+
+void aout_init(void);
+/* Each returns 0, or -1 for a request outside the output's range (nothing changes). */
+int aout_dc(uint32_t mv);
+int aout_sine(uint32_t hz, uint32_t amp_mv, uint32_t offset_mv);
+void aout_off(void);
+const aout_state_t *aout_state(void);
 
 #endif
