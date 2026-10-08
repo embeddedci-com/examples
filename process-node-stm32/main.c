@@ -12,7 +12,7 @@
  * The module's TJA1050 needs 5 V, which makes its SPI outputs 5 V too; PA6 and
  * PC7 are 5 V tolerant. A TXS0108E in between is optional (see README).
  *
- * Analog in:  PA1 (ADC1_IN1, Nucleo A1) <- pod 3.3 V DAC SMA via 10 kOhm.
+ * Analog in:  PA1 (ADC1_IN1, Nucleo A1) <- pod 3.3 V DAC SMA via 5-10 kOhm.
  * Analog out: PA4 (DAC1_OUT1, Nucleo A2) -> pod ADC SMA (off until asked).
  *
  * Console: USART1 PA9 (TX) / PA10 (RX), 115200 8N1. Type "help".

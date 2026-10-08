@@ -7,7 +7,7 @@ temperature the heater would reach (a curve), lags toward it with a ~0.3 s time 
 the sensor voltage on its 3.3 V DAC SMA. No host is in that path, so the loop runs in real time.
 
     node PA4 (heater mV) -> pod ADC SMA -> curve + first-order lag (iCE40) -> pod 3.3 V DAC SMA
-         -> 10 kOhm -> node PA1 (0.5 V + 20 mV/degC) -> PI (50 Hz) -> PA4
+         -> 5-10 kOhm -> node PA1 (0.5 V + 20 mV/degC) -> PI (50 Hz) -> PA4
 
 Plant: ambient 20 degC, +0.03 degC per mV of heater drive (3.0 V -> 110 degC). The same numbers drive
 the host simulation in tests/sim_thermostat.c, which the controller gains were picked against.
@@ -63,7 +63,7 @@ def plant(benchpod, wiring, node):
             time.sleep(0.2)
             return statistics.mean(node.ain()["mv"] for _ in range(3))
 
-    # Two-point fit of the 3.3 V output path, code -> mV at PA1 (through the 10 kOhm).
+    # Two-point fit of the 3.3 V output path, code -> mV at PA1 (through the 5-10 kOhm).
     c1, c2 = 10000, 30000
     m1, m2 = mv_at_pa1(c1), mv_at_pa1(c2)
     assert m2 - m1 > 300, f"pod 3.3 V output does not reach PA1: {c1}->{m1:.0f} mV, {c2}->{m2:.0f} mV"

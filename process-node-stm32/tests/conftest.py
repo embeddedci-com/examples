@@ -33,7 +33,7 @@ def wiring(pins):
         uart_rx=pins.pin_3,   # pod samples the DUT's TX here
         uart_tx=pins.pin_4,   # pod drives the DUT's RX here
         efuse=pins.efuse,
-        # Analog in: pod 3.3 V DAC SMA -> 10 kOhm -> PA1 (Nucleo A1). PROCESS_NODE_ANALOG=0 on a
+        # Analog in: pod 3.3 V DAC SMA -> 5-10 kOhm -> PA1 (Nucleo A1). PROCESS_NODE_ANALOG=0 on a
         # bench without that lead skips the analog tests instead of failing them.
         ain_path="3v3",
         # Analog out: PA4 (Nucleo A2) -> pod ADC SMA (adc_ext). Same PROCESS_NODE_ANALOG switch.

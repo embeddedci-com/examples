@@ -5,7 +5,7 @@ reads it on PA1 with 16x oversampling and VDDA correction, the way a product wou
 point of a sweep within tolerance, the overall gain and offset, the low-pass filtered process value
 after a step, and that the background sampler keeps running.
 
-Wiring: pod 3.3 V DAC SMA -> 10 kOhm -> PA1 (Nucleo A1), grounds common. The resistor limits the
+Wiring: pod 3.3 V DAC SMA -> 5-10 kOhm -> PA1 (Nucleo A1), grounds common. The resistor limits the
 current into an unpowered F446 (the pod keeps driving while the DUT rail is off).
 """
 
@@ -19,7 +19,7 @@ SWEEP_V = [0.10, 0.50, 1.00, 1.65, 2.20, 2.80, 3.00]
 # (+-10 mV at 3.3 V, so ~0.3 %), with margin.
 TOL_MV = 25
 TOL_REL = 0.01
-SETTLE_S = 0.05      # DAC + 10 kOhm into the sample cap: microseconds, plus one 10 ms sample period
+SETTLE_S = 0.05      # DAC + 5-10 kOhm into the sample cap: microseconds, plus one 10 ms sample period
 FILTER_SETTLE_S = 3.0  # ~0.32 s time constant: 1 % after ~1.5 s
 
 

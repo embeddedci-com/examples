@@ -29,7 +29,7 @@ practice; `can selftest` checks it. If it is ever flaky, put a TXS0108E in betwe
   termination, so the termination test can prove the switch: on, traffic flows; off, the
   unterminated bus carries nothing. With the jumper fitted, set `CAN_NODE_TERM=1`.
 - The Nucleo's ST-LINK holds the F446 in reset for about 2.2 s after power-up.
-- Analog in: pod **3.3 V DAC SMA -> 10 kOhm -> PA1** (Nucleo A1). The resistor limits the
+- Analog in: pod **3.3 V DAC SMA -> 5-10 kOhm -> PA1** (Nucleo A1). The resistor limits the
   current into the F446 when its rail is off and the pod still drives. Use the 3.3 V SMA
   only: the 5 V and +-12 V SMAs would damage the pin. On a bench without this lead set
   `PROCESS_NODE_ANALOG=0` to skip the analog tests.

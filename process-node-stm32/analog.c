@@ -13,7 +13,7 @@ static uint32_t g_next_ms;
 static uint32_t g_next_vref_ms;
 
 /* One conversion, polled. 480-cycle sample time at ADCCLK 8 MHz = 60 us: long
- * enough for the 10 kOhm series resistor in front of PA1 and for VREFINT (>= 10 us). */
+ * enough for the 5-10 kOhm series resistor in front of PA1 and for VREFINT (>= 10 us). */
 static uint32_t adc_convert(uint32_t channel)
 {
     ADC1->SQR3 = channel;
