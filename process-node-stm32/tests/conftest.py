@@ -39,6 +39,42 @@ TICK_DIV = 65535
 K = 150
 
 
+def pytest_addoption(parser):
+    parser.addoption("--soak", type=int, default=0, metavar="N",
+                     help="run every hardware test N times and print a per-test pass-rate table "
+                          "(flakiness hunting; the update test is excluded, see PROCESS_NODE_FLASH_CYCLES)")
+
+
+def pytest_generate_tests(metafunc):
+    rounds = metafunc.config.getoption("soak")
+    if rounds > 1 and metafunc.definition.get_closest_marker("hardware") \
+            and metafunc.module.__name__ != "test_update":
+        metafunc.fixturenames.append("soak_round")
+        metafunc.parametrize("soak_round", range(1, rounds + 1), ids=lambda r: f"soak{r}")
+
+
+_SOAK = {}
+
+
+def pytest_runtest_logreport(report):
+    if not re.search(r"[\[-]soak\d+[\]-]", report.nodeid):
+        return
+    if report.when == "call" or (report.when == "setup" and report.outcome == "failed"):
+        base = re.sub(r"soak\d+-|-?soak\d+", "", report.nodeid).replace("[]", "")
+        passed, total = _SOAK.get(base, (0, 0))
+        _SOAK[base] = (passed + (report.outcome == "passed"), total + 1)
+
+
+def pytest_terminal_summary(terminalreporter):
+    if not _SOAK:
+        return
+    tr = terminalreporter
+    tr.section("soak pass rate")
+    for base, (passed, total) in sorted(_SOAK.items(), key=lambda kv: kv[1][0] / kv[1][1]):
+        mark = "" if passed == total else "   <-- flaky"
+        tr.write_line(f"{passed:4d}/{total:<4d} {base}{mark}")
+
+
 @pytest.fixture(scope="session")
 def benchpod_la_voltage():
     """LA I/O-bank voltage the ``benchpod`` fixture selects on connect (must match the DUT)."""

@@ -90,7 +90,9 @@ pytest process-node-stm32/tests -v --benchpod-connection=<host or embeddedci:nam
     --benchpod-firmware=process-node-stm32/build/process-node.elf
 ```
 
-Without `--benchpod-firmware` the tests use the firmware already on the board. Set
+Without `--benchpod-firmware` the tests use the firmware already on the board.
+`--soak N` runs every hardware test N times and ends with a per-test pass-rate table
+(flaky tests at the top). Set
 `CAN_NODE_OSC_MHZ=16` for a 16 MHz module (adds the 1 Mbit/s case).
 
 `tests/test_lifecycle.py`: firmware identity, uptime, and the reset cause after a power
