@@ -55,6 +55,7 @@ With 8 MHz the fastest bitrate is 500 kbit/s; 1 Mbit/s needs a 16 MHz crystal.
 | `info` | `INFO fw=process-node version=... uptime_ms=... reset=power-on\|software\|iwdg\|pin\|brownout` |
 | `ain` | `AIN mv=... raw=... filt_mv=... vdda_mv=... samples=...`: analog input PA1 |
 | `aout [<mV> \| sine <Hz> <amp-mV> <offset-mV> \| off]` | analog output PA4 (DAC, 0.2 V .. VDDA-0.2 V, sine by DDS at 10 kHz); off = high-Z |
+| `ctl [on <degC> \| off]` | thermostat: PA1 sensor (0.5 V + 20 mV/degC) -> PI at 50 Hz -> PA4 heater; `CTL mode=... sp_c=... pv_c=... out_mv=... in_band_ms=...` |
 | `wdt stall` | stop kicking the watchdog (~2 s timeout) so the IWDG resets the node |
 | `can status` | mode, bitrate, TEC/REC, error flags, counters |
 | `can init [bitrate]` | reset and configure the MCP2515 (default 500000) |
@@ -90,6 +91,13 @@ after a step, and the 100 Hz background sampler.
 
 `tests/test_analog_out.py`: the node's DAC measured by the pod's ADC: off is high-Z, DC
 levels, 10/50/200 Hz sine (frequency, amplitude, offset), and refused out-of-range requests.
+
+`tests/test_thermostat.py`: the node regulates a temperature against a thermal plant the
+pod emulates in its FPGA (control loop: ADC SMA -> curve -> ~0.3 s lag -> 3.3 V DAC SMA,
+no host in the path). Open-loop plant check, settle and hold at a setpoint, a setpoint
+change, an ambient drop it must reject, and refused setpoints. The gains come from the host
+simulation in `tests/sim_thermostat.c` (part of `make test-host`), which models the fabric's
+integer damping.
 
 `tests/test_can_hil.py`: both directions with standard and extended ids and 0 to 8 bytes, request/response
 (echo), periodic timing from the pod's timestamps, bursts within and beyond the pod's RX

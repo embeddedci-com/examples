@@ -22,6 +22,7 @@
 #include "analog.h"
 #include "mcp2515.h"
 #include "mcp2515_timing.h"
+#include "thermostat.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -97,6 +98,8 @@ static can_state_t g_can = {
 };
 static periodic_t g_periodic;
 static const char *g_reset_cause = "unknown";
+static thermo_t g_thermo;
+static uint32_t g_thermo_next_ms;
 
 void SystemClock_Config(void);
 static void USART1_Init(void);
@@ -116,6 +119,8 @@ static void iwdg_start(void);
 static void iwdg_kick(void);
 static void print_info(void);
 static void handle_aout(char *args);
+static void handle_ctl(char *args);
+static void thermo_tick(uint32_t now_ms);
 
 int _write(int file, char *ptr, int len)
 {
@@ -153,6 +158,7 @@ int main(void)
     can_init(g_can.bitrate);
     ain_init();
     aout_init();
+    thermo_init(&g_thermo);
     printf("APP_OK\r\n");
     printf("type a command and press Enter (e.g. help)\r\n");
     print_prompt();
@@ -176,6 +182,7 @@ int main(void)
         }
 
         ain_tick(HAL_GetTick());
+        thermo_tick(HAL_GetTick());
 
         if (g_can.init_ok)
         {
@@ -688,6 +695,10 @@ static void process_command(char *cmd)
     {
         print_info();
     }
+    else if (strcmp(cmd, "ctl") == 0 || strncmp(cmd, "ctl ", 4) == 0)
+    {
+        handle_ctl(cmd + 3);
+    }
     else if (strcmp(cmd, "aout") == 0 || strncmp(cmd, "aout ", 5) == 0)
     {
         handle_aout(cmd + 4);
@@ -732,6 +743,7 @@ static void print_help(void)
     printf("  info                      firmware, version, uptime, reset cause\r\n");
     printf("  ain                       analog input PA1: mV, raw, filtered, VDDA\r\n");
     printf("  aout [<mV> | sine <Hz> <amp-mV> <offset-mV> | off]   analog output PA4\r\n");
+    printf("  ctl [on <degC> | off]     thermostat: PA1 sensor (0.5 V + 20 mV/degC) -> PI -> PA4\r\n");
     printf("  status | can status       counters, mode, error state\r\n");
     printf("  can init [bitrate]        reset + configure the MCP2515 (default 500000)\r\n");
     printf("  can osc <MHz>             module crystal (8 or 16), then re-init\r\n");
@@ -793,6 +805,11 @@ static void handle_aout(char *args)
         print_aout();
         return;
     }
+    if (g_thermo.on)
+    {
+        thermo_stop(&g_thermo);
+        printf("CTL off: manual output\r\n");
+    }
     if (strcmp(a0, "off") == 0)
     {
         aout_off();
@@ -821,6 +838,116 @@ static void handle_aout(char *args)
         return;
     }
     print_aout();
+}
+
+/* ---------------------------------------------------------------- thermostat */
+
+static void thermo_tick(uint32_t now_ms)
+{
+    if (!g_thermo.on || (int32_t)(now_ms - g_thermo_next_ms) < 0)
+    {
+        return;
+    }
+    g_thermo_next_ms += THERMO_PERIOD_MS;
+    if ((int32_t)(now_ms - g_thermo_next_ms) >= 0)
+    {
+        g_thermo_next_ms = now_ms + THERMO_PERIOD_MS;
+    }
+    int32_t out = thermo_step(&g_thermo, ain_state()->mv);
+    (void)aout_dc((uint32_t)out); /* the controller clamps to the output's range */
+}
+
+static void print_dc(const char *key, int32_t dc)
+{
+    int32_t a = dc < 0 ? -dc : dc;
+    printf(" %s=%s%ld.%ld", key, dc < 0 ? "-" : "", (long)(a / 10), (long)(a % 10));
+}
+
+static void print_ctl(void)
+{
+    printf("CTL mode=%s", g_thermo.on ? "on" : "off");
+    print_dc("sp_c", g_thermo.sp_dc);
+    print_dc("pv_c", proc_mv_to_dc(ain_state()->mv));
+    printf(" out_mv=%ld in_band_ms=%lu steps=%lu\r\n", (long)(g_thermo.on ? g_thermo.out_mv : 0),
+           (unsigned long)(g_thermo.in_band_steps * THERMO_PERIOD_MS),
+           (unsigned long)g_thermo.steps);
+}
+
+/* "60", "60.5", "-5.5" -> deci-degC. Returns 0 on success. */
+static int parse_dc(const char *s, int32_t *out)
+{
+    if (s == NULL || *s == '\0')
+    {
+        return -1;
+    }
+    int neg = (*s == '-');
+    if (neg)
+    {
+        s++;
+    }
+    char *end;
+    unsigned long whole = strtoul(s, &end, 10);
+    if (end == s)
+    {
+        return -1;
+    }
+    unsigned long tenth = 0UL;
+    if (*end == '.')
+    {
+        if (end[1] < '0' || end[1] > '9' || end[2] != '\0')
+        {
+            return -1;
+        }
+        tenth = (unsigned long)(end[1] - '0');
+    }
+    else if (*end != '\0')
+    {
+        return -1;
+    }
+    if (whole > 1000UL)
+    {
+        return -1;
+    }
+    int32_t v = (int32_t)(whole * 10UL + tenth);
+    *out = neg ? -v : v;
+    return 0;
+}
+
+static void handle_ctl(char *args)
+{
+    char *a0 = strtok(args, " ");
+    if (a0 == NULL)
+    {
+        print_ctl();
+        return;
+    }
+    if (strcmp(a0, "off") == 0)
+    {
+        thermo_stop(&g_thermo);
+        aout_off(); /* thermostat off = heater off */
+        print_ctl();
+        return;
+    }
+    int32_t sp;
+    if (strcmp(a0, "on") != 0 || parse_dc(strtok(NULL, " "), &sp) != 0)
+    {
+        printf("CTL error: usage ctl on <degC 0..100, one decimal> | ctl off\r\n");
+        return;
+    }
+    const aout_state_t *a = aout_state();
+    int32_t current = (a->mode == AOUT_DC) ? (int32_t)a->mv : THERMO_OUT_MIN_MV;
+    int was_on = g_thermo.on;
+    if (thermo_start(&g_thermo, sp, current) != 0)
+    {
+        printf("CTL error: setpoint out of range 0.0..100.0 degC\r\n");
+        return;
+    }
+    if (!was_on)
+    {
+        (void)aout_dc((uint32_t)g_thermo.out_mv);
+        g_thermo_next_ms = HAL_GetTick();
+    }
+    print_ctl();
 }
 
 /* ---------------------------------------------------------------- lifecycle */

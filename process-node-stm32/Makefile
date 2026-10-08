@@ -68,7 +68,7 @@ all: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).bin $(BUILD_DIR)/$(TARGET
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/%.o: %.c mcp2515.h mcp2515_timing.h analog.h proc.h sine_table.h | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: %.c mcp2515.h mcp2515_timing.h analog.h proc.h sine_table.h thermostat.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/%.o: $(HAL_DIR)/Src/%.c | $(BUILD_DIR)

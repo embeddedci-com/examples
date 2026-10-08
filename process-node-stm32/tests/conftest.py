@@ -93,6 +93,16 @@ class Node:
         assert not body.startswith("error"), f"aout {args}: {body}"
         return {k: (v if k == "mode" else int(v)) for k, v in (kv.split("=", 1) for kv in body.split())}
 
+    def ctl(self, args=""):
+        """Run ``ctl <args>``; returns mode (str), sp_c/pv_c (float degC), out_mv/in_band_ms/steps."""
+        m = self.cmd(f"ctl {args}".strip(), r"CTL ([^\r\n]*)\r\n")
+        body = m.group(1)
+        assert not body.startswith("error"), f"ctl {args}: {body}"
+        out = {}
+        for k, v in (kv.split("=", 1) for kv in body.split()):
+            out[k] = v if k == "mode" else float(v) if k.endswith("_c") else int(v)
+        return out
+
     def status(self):
         m = self.cmd("can status", r"CAN status: ([^\r\n]*)\r\n")
         return dict(kv.split("=", 1) for kv in m.group(1).split())
