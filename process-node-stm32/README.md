@@ -61,7 +61,7 @@ With 8 MHz the fastest bitrate is 500 kbit/s; 1 Mbit/s needs a 16 MHz crystal.
 
 | Command | Does |
 |---|---|
-| `info` | `INFO fw=process-node version=... uptime_ms=... reset=power-on\|software\|iwdg\|pin\|brownout` |
+| `info` | `INFO fw=process-node version=... uptime_ms=... boot_ms=... reset=power-on\|software\|iwdg\|pin\|brownout` |
 | `ain` | `AIN mv=... raw=... filt_mv=... vdda_mv=... samples=...`: analog input PA1 |
 | `aout [<mV> \| sine <Hz> <amp-mV> <offset-mV> \| off]` | analog output PA4 (DAC, 0.2 V .. VDDA-0.2 V, sine by DDS at 10 kHz); off = high-Z |
 | `ctl [on <degC> \| off]` | thermostat: PA1 sensor (0.5 V + 20 mV/degC) -> PI at 50 Hz -> PA4 heater; `CTL mode=... sp_c=... pv_c=... out_mv=... in_band_ms=...` |
@@ -118,6 +118,13 @@ sensor going missing and coming back.
 `tests/test_timing.py`: the pod's logic analyzer times the node on PA8/PB0: 100 Hz ADC
 sampling (rate, jitter, ~1 ms cost per reading), the 50 Hz control rate while regulating,
 the 200 ms env reads, and PB0 rising within 0.5 ms of the reading that confirms an alarm.
+
+`tests/test_power.py`: firmware boot time and power-on-to-ready, idle and regulating
+supply current against a budget (`PROCESS_NODE_IDLE_MA_MAX`, whole Nucleo board), and
+5 ms / 50 ms / 500 ms supply dropouts (rides through or reboots cleanly, never hangs).
+
+`tests/test_update.py`: flash, boot and identify the image N times
+(`PROCESS_NODE_FLASH_CYCLES`, default 2; needs `--benchpod-firmware`).
 
 `tests/test_can_hil.py`: both directions with standard and extended ids and 0 to 8 bytes, request/response
 (echo), periodic timing from the pod's timestamps, bursts within and beyond the pod's RX

@@ -112,6 +112,7 @@ static can_state_t g_can = {
 };
 static periodic_t g_periodic;
 static const char *g_reset_cause = "unknown";
+static uint32_t g_boot_ms; /* ms from reset release to APP_OK */
 static thermo_t g_thermo;
 static uint32_t g_thermo_next_ms;
 static const char *g_ctl_trip = "none";
@@ -196,6 +197,7 @@ int main(void)
     alarm_init(&g_alarm);
     alarm_out_init();
     strobe_init();
+    g_boot_ms = HAL_GetTick();
     printf("APP_OK\r\n");
     printf("type a command and press Enter (e.g. help)\r\n");
     print_prompt();
@@ -1235,8 +1237,9 @@ static void iwdg_kick(void)
 
 static void print_info(void)
 {
-    printf("INFO fw=%s version=%s build=\"%s %s\" uptime_ms=%lu reset=%s\r\n", FW_NAME,
-           FW_VERSION, __DATE__, __TIME__, (unsigned long)HAL_GetTick(), g_reset_cause);
+    printf("INFO fw=%s version=%s build=\"%s %s\" uptime_ms=%lu boot_ms=%lu reset=%s\r\n",
+           FW_NAME, FW_VERSION, __DATE__, __TIME__, (unsigned long)HAL_GetTick(),
+           (unsigned long)g_boot_ms, g_reset_cause);
 }
 
 void USART1_IRQHandler(void)

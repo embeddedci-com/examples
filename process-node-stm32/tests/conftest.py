@@ -5,6 +5,7 @@ The node is flashed (when --benchpod-firmware is given) and booted ONCE per sess
 analog and lifecycle files share one boot.
 """
 
+import contextlib
 import os
 import re
 import statistics
@@ -91,8 +92,29 @@ def _flash(bp, wiring, firmware):
 class Node:
     """The Nucleo process node, driven through its UART console."""
 
-    def __init__(self, uart):
-        self.uart = uart
+    def __init__(self, benchpod, wiring):
+        self._bp = benchpod
+        self._wiring = wiring
+        self._session = None
+        self.uart = None
+
+    def open(self):
+        self._session = self._bp.open_uart(rx=self._wiring.uart_rx, tx=self._wiring.uart_tx)
+        self.uart = self._session.__enter__()
+
+    def close(self):
+        if self._session is not None:
+            self._session.__exit__(None, None, None)
+            self._session = self.uart = None
+
+    @contextlib.contextmanager
+    def paused(self):
+        """Close the console for a block that needs the pod to itself (flashing), then reopen it."""
+        self.close()
+        try:
+            yield
+        finally:
+            self.open()
 
     def cmd(self, line, pattern, timeout=3.0):
         """Send a console line and wait for ``pattern`` (regex) in the reply."""
@@ -171,17 +193,18 @@ def node(benchpod, wiring, pytestconfig):
         assert result.ok, f"flash failed; openocd output:\n{result.stderr}"
     benchpod.power_off(wiring.efuse)
     benchpod.power_on(wiring.efuse, delay=1.5)
+    n = Node(benchpod, wiring)
     try:
-        with benchpod.open_uart(rx=wiring.uart_rx, tx=wiring.uart_tx) as uart:
-            n = Node(uart)
-            # The boot banner can be clipped on a slow link, so check the result by command.
-            uart.read_until("APP_OK", timeout=5)
-            if OSC_MHZ != 8:
-                n.cmd(f"can osc {OSC_MHZ}", r"CAN init (ok|fail)")
-            st = n.status()
-            assert st["chip"] == "ok", f"MCP2515 not answering on SPI: {st}"
-            yield n
+        n.open()
+        # The boot banner can be clipped on a slow link, so check the result by command.
+        n.uart.read_until("APP_OK", timeout=5)
+        if OSC_MHZ != 8:
+            n.cmd(f"can osc {OSC_MHZ}", r"CAN init (ok|fail)")
+        st = n.status()
+        assert st["chip"] == "ok", f"MCP2515 not answering on SPI: {st}"
+        yield n
     finally:
+        n.close()
         benchpod.power_off(wiring.efuse)
 
 
