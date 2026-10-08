@@ -89,8 +89,16 @@ def test_filtered_value_follows_a_step(node, source):
 
 @pytest.mark.hardware
 def test_background_sampler_runs(node, source):
-    """100 Hz sampling keeps going between commands."""
+    """100 Hz sampling keeps going between commands.
+
+    The interval is taken between the midpoints of the two console round trips, so a slow link
+    (the cloud adds a few hundred ms per command) does not count as extra samples."""
+    t0 = time.monotonic()
     first = node.ain()["samples"]
-    time.sleep(1.0)
+    t1 = time.monotonic()
+    time.sleep(3.0)
+    t2 = time.monotonic()
     count = node.ain()["samples"] - first
-    assert 80 <= count <= 120, f"{count} background samples in 1 s (expected ~100)"
+    t3 = time.monotonic()
+    rate = count / (((t2 + t3) - (t0 + t1)) / 2)
+    assert 85 <= rate <= 115, f"{count} background samples in ~{(t2 + t3 - t0 - t1) / 2:.2f} s = {rate:.1f} Hz (expected ~100)"
