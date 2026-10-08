@@ -43,6 +43,7 @@ practice; `can selftest` checks it. If it is ever flaky, put a TXS0108E in betwe
   `overtemp` (env above the limit, default 50 degC, clears 2 degC below), `pv_fault` (PA1
   out of 0.3-3.1 V while regulating), `env_lost`. Over-temperature and `pv_fault` trip the
   thermostat: heater off, latched until the next `ctl on` (refused while over-temperature).
+- Strobe: **PA8 (Nucleo D7) -> LA6**, low unless `strobe` selects a task.
 - Console: USART1 PA9 (TX) to pod LA3, PA10 (RX) to pod LA4, 115200 8N1.
   SWD: SWCLK LA11, SWDIO LA12.
 
@@ -65,6 +66,7 @@ With 8 MHz the fastest bitrate is 500 kbit/s; 1 Mbit/s needs a 16 MHz crystal.
 | `aout [<mV> \| sine <Hz> <amp-mV> <offset-mV> \| off]` | analog output PA4 (DAC, 0.2 V .. VDDA-0.2 V, sine by DDS at 10 kHz); off = high-Z |
 | `ctl [on <degC> \| off]` | thermostat: PA1 sensor (0.5 V + 20 mV/degC) -> PI at 50 Hz -> PA4 heater; `CTL mode=... sp_c=... pv_c=... out_mv=... in_band_ms=...` |
 | `alarm [limit <degC>]` | `ALARM active=0x.. overtemp= pv_fault= env_lost= limit_c= env=ok\|absent\|lost env_c= press_pa= events=` |
+| `strobe [off\|ain\|ctl\|env]` | PA8 marks a task for the logic analyzer: high during an ADC sample / env read, toggles per control step |
 | `wdt stall` | stop kicking the watchdog (~2 s timeout) so the IWDG resets the node |
 | `can status` | mode, bitrate, TEC/REC, error flags, counters |
 | `can init [bitrate]` | reset and configure the MCP2515 (default 500000) |
@@ -112,6 +114,10 @@ integer damping.
 over-temperature on PB0 + UART + CAN with hysteresis, a spike the debounce ignores, the
 heater trip and no restart while hot, a shorted process sensor while regulating, and the
 sensor going missing and coming back.
+
+`tests/test_timing.py`: the pod's logic analyzer times the node on PA8/PB0: 100 Hz ADC
+sampling (rate, jitter, ~1 ms cost per reading), the 50 Hz control rate while regulating,
+the 200 ms env reads, and PB0 rising within 0.5 ms of the reading that confirms an alarm.
 
 `tests/test_can_hil.py`: both directions with standard and extended ids and 0 to 8 bytes, request/response
 (echo), periodic timing from the pod's timestamps, bursts within and beyond the pod's RX

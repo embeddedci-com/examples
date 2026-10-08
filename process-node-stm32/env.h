@@ -31,6 +31,8 @@ typedef struct
 } env_state_t;
 
 void env_init(void);
+/* env_due(): this pass reads (or probes) the sensor. */
+int env_due(uint32_t now_ms);
 void env_tick(uint32_t now_ms);
 const env_state_t *env_state(void);
 

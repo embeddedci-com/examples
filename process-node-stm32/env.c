@@ -143,6 +143,11 @@ void env_init(void)
     g_next_ms = HAL_GetTick();
 }
 
+int env_due(uint32_t now_ms)
+{
+    return (int32_t)(now_ms - g_next_ms) >= 0;
+}
+
 void env_tick(uint32_t now_ms)
 {
     if ((int32_t)(now_ms - g_next_ms) < 0)

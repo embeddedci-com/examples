@@ -15,45 +15,13 @@ import time
 
 import pytest
 
-from conftest import AMBIENT_C, BITRATE
+from conftest import AMBIENT_C, BITRATE, ENV_ADDR, ENV_START_C, wait_alarm
 
 ALARM_CAN_ID = 0x0A0
-ENV_ADDR = 0x76
-ENV_START_C = 25.0
-LIMIT_C = 50.0
 # Env read every 200 ms, debounce 2 evaluations: <= ~0.6 s plus command latency.
 ALARM_LATENCY_S = 2.0
 # Lost: 3 failed reads (0.6 s) + debounce; back: probe every 1 s + first read + debounce.
 LOST_LATENCY_S = 3.0
-
-
-@pytest.fixture
-def env(benchpod, wiring, node):
-    """Emulated BMP280 at 25 degC, the node seeing it, limit 50 degC. Afterwards the sensor is
-    removed and the node rebooted, so no alarm is left active for the next test."""
-    benchpod.enable_pullup(wiring.i2c_scl, wiring.i2c_sda)
-    benchpod.enable_i2c_sensor("bmp280", sda=wiring.i2c_sda, scl=wiring.i2c_scl,
-                               address=ENV_ADDR, temperature_c=ENV_START_C, pressure_pa=101325.0)
-    try:
-        node.alarm(f"limit {LIMIT_C}")
-        _wait_alarm(node, lambda a: a["env"] == "ok" and abs(a["env_c"] - ENV_START_C) <= 0.2,
-                    timeout=3.0, what="the node to find the BMP280")
-        yield benchpod
-    finally:
-        benchpod.disable_i2c_sensor()
-        benchpod.disable_pullup(wiring.i2c_scl, wiring.i2c_sda)
-        node.reboot()
-
-
-def _wait_alarm(node, cond, *, timeout, what):
-    deadline = time.monotonic() + timeout
-    last = None
-    while time.monotonic() < deadline:
-        last = node.alarm()
-        if cond(last):
-            return last
-        time.sleep(0.1)
-    pytest.fail(f"timed out after {timeout} s waiting for {what}; last: {last}")
 
 
 def _alarm_pin(benchpod, wiring):
@@ -70,7 +38,7 @@ def test_env_sensor_readings(node, env):
     a = node.alarm()
     assert abs(a["press_pa"] - 101325) <= 50, a
     env.set_i2c_sensor(temperature_c=31.5, pressure_pa=95000.0)
-    a = _wait_alarm(node, lambda a: abs(a["env_c"] - 31.5) <= 0.2, timeout=2.0, what="31.5 degC")
+    a = wait_alarm(node, lambda a: abs(a["env_c"] - 31.5) <= 0.2, timeout=2.0, what="31.5 degC")
     assert abs(a["press_pa"] - 95000) <= 50, a
     assert a["active"] == 0, a
 
@@ -139,7 +107,7 @@ def test_overtemp_trips_the_heater(node, env, plant):
     assert node.uart.expect("CTL error: over-temperature", timeout=3.0)
     # ...and a clean one once it has cooled.
     env.set_i2c_sensor(temperature_c=ENV_START_C)
-    _wait_alarm(node, lambda a: a["active"] == 0, timeout=ALARM_LATENCY_S, what="overtemp to clear")
+    wait_alarm(node, lambda a: a["active"] == 0, timeout=ALARM_LATENCY_S, what="overtemp to clear")
     st = node.ctl("on 60")
     assert (st["mode"], st["trip"]) == ("on", "none"), st
 

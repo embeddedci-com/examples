@@ -25,7 +25,9 @@ typedef struct
 } ain_state_t;
 
 void ain_init(void);
-/* Call every main-loop pass; samples on its own schedule. */
+/* Call every main-loop pass; samples on its own schedule. ain_due() says whether
+ * this pass will sample (so a caller can mark it on a pin). */
+int ain_due(uint32_t now_ms);
 void ain_tick(uint32_t now_ms);
 /* Take one fresh oversampled reading now (also updates the state). */
 const ain_state_t *ain_read_now(void);

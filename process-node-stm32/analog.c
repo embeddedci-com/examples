@@ -72,6 +72,11 @@ void ain_init(void)
     g_next_vref_ms = HAL_GetTick() + AIN_VREF_PERIOD_MS;
 }
 
+int ain_due(uint32_t now_ms)
+{
+    return (int32_t)(now_ms - g_next_ms) >= 0;
+}
+
 void ain_tick(uint32_t now_ms)
 {
     if ((int32_t)(now_ms - g_next_vref_ms) >= 0)

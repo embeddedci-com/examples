@@ -17,6 +17,9 @@
  * Env sensor: BMP280 on I2C1 PB8 (SCL) / PB9 (SDA).
  * Alarm out:  PB0 (Nucleo A3), high while any alarm is active; also UART "EVT"
  *             lines and CAN frame 0x0A0 on every change.
+ * Strobe:     PA8 (Nucleo D7), high while the selected task runs (ADC sample or
+ *             env read), or toggled per control step (too short for a pulse),
+ *             so a logic analyzer can time it.
  *
  * Console: USART1 PA9 (TX) / PA10 (RX), 115200 8N1. Type "help".
  */
@@ -58,6 +61,8 @@
 #define ALARM_PORT GPIOB
 #define ALARM_PIN GPIO_PIN_0
 #define ALARM_CAN_ID 0x0A0U
+#define STROBE_PORT GPIOA
+#define STROBE_PIN GPIO_PIN_8
 
 #define CS_PORT GPIOB
 #define CS_PIN GPIO_PIN_6
@@ -112,6 +117,17 @@ static uint32_t g_thermo_next_ms;
 static const char *g_ctl_trip = "none";
 static alarm_t g_alarm;
 static uint32_t g_alarm_next_ms;
+static uint32_t g_alarm_env_seq;
+
+typedef enum
+{
+    STROBE_OFF = 0,
+    STROBE_AIN,
+    STROBE_CTL,
+    STROBE_ENV,
+} strobe_mode_t;
+static strobe_mode_t g_strobe;
+static const char *const STROBE_NAMES[] = {"off", "ain", "ctl", "env"};
 
 void SystemClock_Config(void);
 static void USART1_Init(void);
@@ -136,6 +152,8 @@ static void thermo_tick(uint32_t now_ms);
 static void alarm_out_init(void);
 static void alarm_tick(uint32_t now_ms);
 static void handle_alarm(char *args);
+static void strobe_init(void);
+static void handle_strobe(char *args);
 
 int _write(int file, char *ptr, int len)
 {
@@ -177,6 +195,7 @@ int main(void)
     env_init();
     alarm_init(&g_alarm);
     alarm_out_init();
+    strobe_init();
     printf("APP_OK\r\n");
     printf("type a command and press Enter (e.g. help)\r\n");
     print_prompt();
@@ -199,10 +218,29 @@ int main(void)
             print_prompt();
         }
 
-        ain_tick(HAL_GetTick());
-        thermo_tick(HAL_GetTick());
-        env_tick(HAL_GetTick());
-        alarm_tick(HAL_GetTick());
+        uint32_t now = HAL_GetTick();
+        int mark = (g_strobe == STROBE_AIN) && ain_due(now);
+        if (mark)
+        {
+            STROBE_PORT->BSRR = STROBE_PIN;
+        }
+        ain_tick(now);
+        if (mark)
+        {
+            STROBE_PORT->BSRR = (uint32_t)STROBE_PIN << 16U;
+        }
+        thermo_tick(now);
+        mark = (g_strobe == STROBE_ENV) && env_due(now);
+        if (mark)
+        {
+            STROBE_PORT->BSRR = STROBE_PIN;
+        }
+        env_tick(now);
+        if (mark)
+        {
+            STROBE_PORT->BSRR = (uint32_t)STROBE_PIN << 16U;
+        }
+        alarm_tick(now); /* right after the read, so an alarm follows its reading at once */
 
         if (g_can.init_ok)
         {
@@ -715,6 +753,10 @@ static void process_command(char *cmd)
     {
         print_info();
     }
+    else if (strcmp(cmd, "strobe") == 0 || strncmp(cmd, "strobe ", 7) == 0)
+    {
+        handle_strobe(cmd + 6);
+    }
     else if (strcmp(cmd, "alarm") == 0 || strncmp(cmd, "alarm ", 6) == 0)
     {
         handle_alarm(cmd + 5);
@@ -769,6 +811,7 @@ static void print_help(void)
     printf("  aout [<mV> | sine <Hz> <amp-mV> <offset-mV> | off]   analog output PA4\r\n");
     printf("  ctl [on <degC> | off]     thermostat: PA1 sensor (0.5 V + 20 mV/degC) -> PI -> PA4\r\n");
     printf("  alarm [limit <degC>]      alarms, env sensor (BMP280), over-temperature limit\r\n");
+    printf("  strobe [off|ain|ctl|env]  PA8 marks that task: high while ain/env runs, toggles per ctl step\r\n");
     printf("  status | can status       counters, mode, error state\r\n");
     printf("  can init [bitrate]        reset + configure the MCP2515 (default 500000)\r\n");
     printf("  can osc <MHz>             module crystal (8 or 16), then re-init\r\n");
@@ -880,6 +923,10 @@ static void thermo_tick(uint32_t now_ms)
     }
     int32_t out = thermo_step(&g_thermo, ain_state()->mv);
     (void)aout_dc((uint32_t)out); /* the controller clamps to the output's range */
+    if (g_strobe == STROBE_CTL)
+    {
+        STROBE_PORT->ODR ^= STROBE_PIN; /* one edge per step: a few us is too short a pulse */
+    }
 }
 
 static void print_dc(const char *key, int32_t dc)
@@ -998,13 +1045,23 @@ static void alarm_out_init(void)
 
 static void alarm_tick(uint32_t now_ms)
 {
-    if ((int32_t)(now_ms - g_alarm_next_ms) < 0)
+    /* Evaluate once per new env reading (or status change), so the debounce counts
+     * readings; without a sensor, on a timer of the same period. */
+    const env_state_t *e = env_state();
+    if (e->seq != g_alarm_env_seq)
+    {
+        g_alarm_env_seq = e->seq;
+        g_alarm_next_ms = now_ms + ENV_PERIOD_MS;
+    }
+    else if (e->status != ENV_OK && (int32_t)(now_ms - g_alarm_next_ms) >= 0)
+    {
+        g_alarm_next_ms = now_ms + ENV_PERIOD_MS;
+    }
+    else
     {
         return;
     }
-    g_alarm_next_ms = now_ms + ENV_PERIOD_MS;
 
-    const env_state_t *e = env_state();
     alarm_in_t in = {
         .env_ok = (e->status == ENV_OK && e->reads > 0U) ? 1U : 0U,
         .env_lost = (e->status == ENV_LOST) ? 1U : 0U,
@@ -1080,6 +1137,44 @@ static void handle_alarm(char *args)
     }
     g_alarm.limit_dc = lim;
     print_alarm();
+}
+
+/* ---------------------------------------------------------------- strobe */
+
+static void strobe_init(void)
+{
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    STROBE_PORT->BSRR = (uint32_t)STROBE_PIN << 16U;
+    GPIO_InitTypeDef g = {0};
+    g.Pin = STROBE_PIN;
+    g.Mode = GPIO_MODE_OUTPUT_PP;
+    g.Pull = GPIO_NOPULL;
+    g.Speed = GPIO_SPEED_FREQ_MEDIUM;
+    HAL_GPIO_Init(STROBE_PORT, &g);
+}
+
+static void handle_strobe(char *args)
+{
+    char *a0 = strtok(args, " ");
+    if (a0 != NULL)
+    {
+        uint32_t i;
+        for (i = 0; i < sizeof(STROBE_NAMES) / sizeof(STROBE_NAMES[0]); i++)
+        {
+            if (strcmp(a0, STROBE_NAMES[i]) == 0)
+            {
+                break;
+            }
+        }
+        if (i == sizeof(STROBE_NAMES) / sizeof(STROBE_NAMES[0]))
+        {
+            printf("STROBE error: usage strobe [off|ain|ctl|env]\r\n");
+            return;
+        }
+        g_strobe = (strobe_mode_t)i;
+        STROBE_PORT->BSRR = (uint32_t)STROBE_PIN << 16U;
+    }
+    printf("STROBE mode=%s\r\n", STROBE_NAMES[g_strobe]);
 }
 
 /* ---------------------------------------------------------------- lifecycle */

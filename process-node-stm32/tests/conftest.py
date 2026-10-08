@@ -20,6 +20,11 @@ FLASH_ATTEMPTS = 3
 OSC_MHZ = int(os.environ.get("CAN_NODE_OSC_MHZ", "8"))
 BITRATE = 500_000
 
+# The emulated BMP280 (test_alarms.py, test_timing.py).
+ENV_ADDR = 0x76
+ENV_START_C = 25.0
+LIMIT_C = 50.0
+
 # The thermal plant the pod emulates for the thermostat (test_thermostat.py, test_alarms.py).
 AMBIENT_C = 20.0
 C_PER_MV = 0.03
@@ -52,6 +57,7 @@ def wiring(pins):
         i2c_scl=pins.pin_1,   # PB8, the pod emulates the BMP280 here
         i2c_sda=pins.pin_2,   # PB9
         alarm=pins.pin_5,     # PB0, high while any alarm is active
+        strobe=pins.pin_6,    # PA8, marks ADC samples / control steps / env reads
         # Analog in: pod 3.3 V DAC SMA -> 5-10 kOhm -> PA1 (Nucleo A1). PROCESS_NODE_ANALOG=0 on a
         # bench without that lead skips the analog tests instead of failing them.
         ain_path="3v3",
@@ -241,3 +247,33 @@ def plant(benchpod, wiring, node):
         node.ctl("off")
         benchpod.dac_stop()
         benchpod.dac_output("off")
+
+
+@pytest.fixture
+def env(benchpod, wiring, node):
+    """Emulated BMP280 at 25 degC, the node seeing it, limit 50 degC. Afterwards the sensor is
+    removed and the node rebooted, so no alarm is left active for the next test."""
+    benchpod.enable_pullup(wiring.i2c_scl, wiring.i2c_sda)
+    benchpod.enable_i2c_sensor("bmp280", sda=wiring.i2c_sda, scl=wiring.i2c_scl,
+                               address=ENV_ADDR, temperature_c=ENV_START_C, pressure_pa=101325.0)
+    try:
+        node.alarm(f"limit {LIMIT_C}")
+        wait_alarm(node, lambda a: a["env"] == "ok" and abs(a["env_c"] - ENV_START_C) <= 0.2,
+                    timeout=3.0, what="the node to find the BMP280")
+        yield benchpod
+    finally:
+        benchpod.disable_i2c_sensor()
+        benchpod.disable_pullup(wiring.i2c_scl, wiring.i2c_sda)
+        node.reboot()
+
+
+def wait_alarm(node, cond, *, timeout, what):
+    """Poll ``alarm`` until ``cond(reply)`` holds; fails with the last reply after ``timeout``."""
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        last = node.alarm()
+        if cond(last):
+            return last
+        time.sleep(0.1)
+    pytest.fail(f"timed out after {timeout} s waiting for {what}; last: {last}")
