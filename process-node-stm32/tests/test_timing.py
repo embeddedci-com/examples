@@ -6,7 +6,9 @@ the sampling and control rates, their jitter, the time a sample costs, and how f
 (PB0 on LA5) follows the reading that confirms an alarm.
 """
 
+import concurrent.futures
 import statistics
+import time
 
 import pytest
 
@@ -20,6 +22,7 @@ AIN_JITTER_S = 0.0015      # 1 ms SysTick scheduling + the occasional VREFINT/en
 CTL_JITTER_S = 0.0025      # a control step can wait behind a 1 ms ADC burst
 AIN_BUSY_S = (0.0007, 0.0014)  # 16 conversions x 61.5 us = 0.98 ms
 ALARM_AFTER_READ_S = 0.0005
+ARM_WAIT_S = 0.5            # time for a capture to arm before the stimulus (cloud: a few 100 ms)
 
 
 @pytest.fixture
@@ -82,14 +85,22 @@ def test_env_reading_rate(benchpod, wiring, node, env, strobe):
 
 @pytest.mark.hardware
 def test_alarm_follows_its_reading(benchpod, wiring, node, env, strobe):
-    """PB0 rises right after the env read that confirms over-temperature (debounce: 2 readings)."""
+    """PB0 rises right after the env read that confirms over-temperature (debounce: 2 readings).
+
+    The capture must be running before the sensor goes hot: over the cloud a capture starts a few
+    hundred ms after it is requested, by which time the alarm has already risen. So the capture
+    runs in a thread and the stimulus follows once it has had time to arm."""
     strobe("env")
-    env.set_i2c_sensor(temperature_c=60.0)
-    cap = benchpod.capture_la(65536, sample_rate_hz=50_000)  # 1.3 s: the alarm sets within ~0.4 s
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        # 2.6 s at 40 us resolution: arming + ARM_WAIT_S + up to ~0.6 s to the alarm fit easily.
+        job = pool.submit(benchpod.capture_la, 65536, sample_rate_hz=25_000)
+        time.sleep(ARM_WAIT_S)
+        env.set_i2c_sensor(temperature_c=60.0)
+        cap = job.result(timeout=30)
     rise = cap.first_edge(wiring.alarm, "rising")
-    assert rise is not None, "PB0 did not rise within the capture"
+    assert rise is not None, "PB0 did not rise within the capture (started too late or too short)"
     reads = [t for t in cap.edge_times(wiring.strobe, "falling") if t <= rise]
-    assert reads, "no env read before the alarm in the capture"
+    assert reads, f"no env read before the alarm at {rise:.3f} s: the capture armed after the stimulus"
     latency = rise - reads[-1]
     assert latency <= ALARM_AFTER_READ_S, \
         f"PB0 rose {latency * 1e3:.3f} ms after the confirming read (limit {ALARM_AFTER_READ_S * 1e3} ms)"
