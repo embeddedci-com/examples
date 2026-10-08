@@ -1,8 +1,10 @@
 # process-node-stm32
 
-A CAN node on a NUCLEO-F446RE with an MCP2515/TJA1050 module, used as the second node
-when testing the BenchPod's CAN port. The Nucleo runs a UART console; the tests drive it
-over that console and talk to it from the pod's CAN API.
+A process-control node on a NUCLEO-F446RE with an MCP2515/TJA1050 module. It behaves like
+a small real product (CAN, analog in/out, a thermostat loop, alarms, a watchdog) so the
+BenchPod HIL tests cover real use cases, not just single pod features. The Nucleo runs a
+UART console; the tests drive it over that console and check what it does from the pod
+(CAN API, ADC/DAC, LA, power).
 
 ## Wiring
 
@@ -44,6 +46,8 @@ With 8 MHz the fastest bitrate is 500 kbit/s; 1 Mbit/s needs a 16 MHz crystal.
 
 | Command | Does |
 |---|---|
+| `info` | `INFO fw=process-node version=... uptime_ms=... reset=power-on\|software\|iwdg\|pin\|brownout` |
+| `wdt stall` | stop kicking the watchdog (~2 s timeout) so the IWDG resets the node |
 | `can status` | mode, bitrate, TEC/REC, error flags, counters |
 | `can init [bitrate]` | reset and configure the MCP2515 (default 500000) |
 | `can osc <MHz>` | set the module crystal, then re-init |
@@ -69,7 +73,10 @@ pytest process-node-stm32/tests -v --benchpod-connection=<host or embeddedci:nam
 Without `--benchpod-firmware` the tests use the firmware already on the board. Set
 `CAN_NODE_OSC_MHZ=16` for a 16 MHz module (adds the 1 Mbit/s case).
 
-Covered: both directions with standard and extended ids and 0 to 8 bytes, request/response
+`tests/test_lifecycle.py`: firmware identity, uptime, and the reset cause after a power
+cycle, a software reset and a watchdog reset.
+
+`tests/test_can_hil.py`: both directions with standard and extended ids and 0 to 8 bytes, request/response
 (echo), periodic timing from the pod's timestamps, bursts within and beyond the pod's RX
 ring (overflow accounting), listen mode on either side (no ACK, error counters),
 125k/250k/500k(/1M), a bitrate mismatch, and the pod's termination switch.

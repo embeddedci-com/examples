@@ -1,6 +1,6 @@
 /*
- * STM32 CAN node: NUCLEO-F446RE + MCP2515/TJA1050 module, driven from a UART
- * console so a BenchPod (or a person) can make it talk on the bus.
+ * Process-control node: NUCLEO-F446RE + MCP2515/TJA1050 module, driven from a
+ * UART console so a BenchPod (or a person) can exercise it like a real product.
  *
  * Wiring (Nucleo Arduino header -> MCP2515 module, direct):
  *   D13 PA5  SPI1_SCK  -> SCK
@@ -23,7 +23,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define FW_NAME "process-node"
+#define FW_VERSION "0.2.0"
+
 #define CMD_BUF_SIZE 96
+
+/* Independent watchdog: LSI ~32 kHz / 64 = 500 Hz, reload 1000 -> ~2 s. The main
+ * loop kicks it every pass; long blocking work (CAN bursts) kicks it as it goes. */
+#define IWDG_RELOAD 1000U
 
 /* Boot attach window (ms): hold before touching peripherals so a flasher that
  * just reset us can connect SWD during a known-quiet window. */
@@ -85,6 +92,7 @@ static can_state_t g_can = {
     .print = 1U,
 };
 static periodic_t g_periodic;
+static const char *g_reset_cause = "unknown";
 
 void SystemClock_Config(void);
 static void USART1_Init(void);
@@ -99,6 +107,10 @@ static void can_service(void);
 static void can_periodic_tick(void);
 static void can_print_status(void);
 static void handle_can(char *args);
+static void reset_cause_capture(void);
+static void iwdg_start(void);
+static void iwdg_kick(void);
+static void print_info(void);
 
 int _write(int file, char *ptr, int len)
 {
@@ -115,21 +127,24 @@ int _write(int file, char *ptr, int len)
 
 int main(void)
 {
+    reset_cause_capture();
     HAL_Init();
     SystemClock_Config();
 
     HAL_DBGMCU_EnableDBGSleepMode();
     HAL_DBGMCU_EnableDBGStopMode();
     HAL_DBGMCU_EnableDBGStandbyMode();
+    DBGMCU->APB1FZ |= DBGMCU_APB1_FZ_DBG_IWDG_STOP; /* a halted core must not be reset */
     HAL_Delay(FLASH_ATTACH_WINDOW_MS);
+    iwdg_start();
 
     USART1_Init();
     SPI1_Init();
     (void)setvbuf(stdout, NULL, _IONBF, 0);
 
-    printf("\r\nCAN-NODE: stm32f446 + mcp2515\r\n");
-    printf("CAN-NODE: build=%s %s\r\n", __DATE__, __TIME__);
-    printf("CAN-NODE: uart=USART1(115200), spi=SPI1 PA5/PA6/PA7, cs=PB6, int=PC7\r\n");
+    printf("\r\nPROCESS-NODE: stm32f446 + mcp2515\r\n");
+    print_info();
+    printf("PROCESS-NODE: uart=USART1(115200), spi=SPI1 PA5/PA6/PA7, cs=PB6, int=PC7\r\n");
     can_init(g_can.bitrate);
     printf("APP_OK\r\n");
     printf("type a command and press Enter (e.g. help)\r\n");
@@ -137,6 +152,7 @@ int main(void)
 
     while (1)
     {
+        iwdg_kick();
         uint8_t b;
         while (usart1_read_byte_nonblocking(&b))
         {
@@ -254,6 +270,7 @@ static void print_frame(const char *tag, const can_frame_t *f)
 
 static mcp_tx_result_t can_send(const can_frame_t *f)
 {
+    iwdg_kick(); /* bursts send up to CAN_BURST_MAX frames from one command */
     mcp_tx_result_t r = mcp_send(f, CAN_TX_TIMEOUT_MS);
     if (r == MCP_TX_OK)
     {
@@ -658,6 +675,19 @@ static void process_command(char *cmd)
     {
         can_print_status();
     }
+    else if (strcmp(cmd, "info") == 0)
+    {
+        print_info();
+    }
+    else if (strcmp(cmd, "wdt stall") == 0)
+    {
+        /* Lifecycle test hook: stop kicking the watchdog; it resets us in ~2 s and
+         * the next boot reports reset=iwdg. */
+        printf("WDT stall: waiting for the watchdog reset\r\n");
+        while (1)
+        {
+        }
+    }
     else if (strncmp(cmd, "can ", 4) == 0)
     {
         handle_can(cmd + 4);
@@ -679,6 +709,7 @@ static void process_command(char *cmd)
 static void print_help(void)
 {
     printf("commands:\r\n");
+    printf("  info                      firmware, version, uptime, reset cause\r\n");
     printf("  status | can status       counters, mode, error state\r\n");
     printf("  can init [bitrate]        reset + configure the MCP2515 (default 500000)\r\n");
     printf("  can osc <MHz>             module crystal (8 or 16), then re-init\r\n");
@@ -693,6 +724,69 @@ static void print_help(void)
     printf("  can clear                 zero the counters\r\n");
     printf("  can regs                  dump MCP2515 registers\r\n");
     printf("  reset                     reboot the MCU\r\n");
+    printf("  wdt stall                 hang until the watchdog resets the MCU\r\n");
+}
+
+/* ---------------------------------------------------------------- lifecycle */
+
+/* Why we booted, read once from RCC_CSR before anything else, then cleared so
+ * the next reset reports only its own cause. A power-on also sets the pin and
+ * brown-out flags, and a software reset also sets the pin flag, hence the order. */
+static void reset_cause_capture(void)
+{
+    uint32_t csr = RCC->CSR;
+    if (csr & RCC_CSR_IWDGRSTF)
+    {
+        g_reset_cause = "iwdg";
+    }
+    else if (csr & RCC_CSR_WWDGRSTF)
+    {
+        g_reset_cause = "wwdg";
+    }
+    else if (csr & RCC_CSR_LPWRRSTF)
+    {
+        g_reset_cause = "lowpower";
+    }
+    else if (csr & RCC_CSR_SFTRSTF)
+    {
+        g_reset_cause = "software";
+    }
+    else if (csr & RCC_CSR_PORRSTF)
+    {
+        g_reset_cause = "power-on";
+    }
+    else if (csr & RCC_CSR_BORRSTF)
+    {
+        g_reset_cause = "brownout";
+    }
+    else if (csr & RCC_CSR_PINRSTF)
+    {
+        g_reset_cause = "pin";
+    }
+    RCC->CSR |= RCC_CSR_RMVF;
+}
+
+static void iwdg_start(void)
+{
+    IWDG->KR = 0xCCCCU; /* start (LSI comes up on its own) */
+    IWDG->KR = 0x5555U; /* unlock PR/RLR */
+    IWDG->PR = IWDG_PR_PR_2; /* /64 */
+    IWDG->RLR = IWDG_RELOAD;
+    while (IWDG->SR != 0U)
+    {
+    }
+    IWDG->KR = 0xAAAAU;
+}
+
+static void iwdg_kick(void)
+{
+    IWDG->KR = 0xAAAAU;
+}
+
+static void print_info(void)
+{
+    printf("INFO fw=%s version=%s build=\"%s %s\" uptime_ms=%lu reset=%s\r\n", FW_NAME,
+           FW_VERSION, __DATE__, __TIME__, (unsigned long)HAL_GetTick(), g_reset_cause);
 }
 
 void USART1_IRQHandler(void)

@@ -25,105 +25,15 @@ Set ``CAN_NODE_OSC_MHZ=16`` for a module with a 16 MHz crystal (also enables the
 """
 
 import os
-import re
 import time
-from types import SimpleNamespace
 
 import pytest
 
-TARGET_CFG = "target/stm32f4x.cfg"
-FLASH_ATTEMPTS = 3
-OSC_MHZ = int(os.environ.get("CAN_NODE_OSC_MHZ", "8"))
+from conftest import BITRATE, OSC_MHZ
+
 # The module's own 120R jumper fitted? Off on this bench, so the pod's switch is the only termination.
 MODULE_TERM = os.environ.get("CAN_NODE_TERM", "0") == "1"
-BITRATE = 500_000
 POD_RX_RING = 31  # frames the pod buffers between reads (32-slot ring, one kept empty)
-
-
-@pytest.fixture(scope="module")
-def wiring(pins):
-    """How THIS bench is wired: DUT signal -> BenchPod LA channel."""
-    return SimpleNamespace(
-        swclk=pins.pin_11,
-        swdio=pins.pin_12,
-        nreset=True,
-        uart_rx=pins.pin_3,   # pod samples the DUT's TX here
-        uart_tx=pins.pin_4,   # pod drives the DUT's RX here
-        efuse=pins.efuse,
-    )
-
-
-def _flash(bp, wiring, firmware):
-    result = None
-    for attempt in range(FLASH_ATTEMPTS):
-        if attempt > 0:
-            bp.power_off(wiring.efuse)
-        result = bp.flash(
-            file=firmware, target=TARGET_CFG,
-            swclk=wiring.swclk, swdio=wiring.swdio, nreset=wiring.nreset,
-            target_power=wiring.efuse, check=False,
-        )
-        if not result.ok and result.target_unreachable and wiring.nreset:
-            result = bp.flash(
-                file=firmware, target=TARGET_CFG,
-                swclk=wiring.swclk, swdio=wiring.swdio, nreset=False,
-                target_power=wiring.efuse, check=False,
-            )
-        if result.ok:
-            break
-    return result
-
-
-class Node:
-    """The Nucleo CAN node, driven through its UART console."""
-
-    def __init__(self, uart):
-        self.uart = uart
-
-    def cmd(self, line, pattern, timeout=3.0):
-        """Send a console line and wait for ``pattern`` (regex) in the reply."""
-        self.uart.read()  # forget earlier output so we only match this command's reply
-        self.uart.write(line + "\r\n")
-        return self.uart.expect(re.compile(pattern), timeout=timeout)
-
-    def status(self):
-        m = self.cmd("can status", r"CAN status: ([^\r\n]*)\r\n")
-        return dict(kv.split("=", 1) for kv in m.group(1).split())
-
-    def init(self, bitrate=BITRATE):
-        self.cmd(f"can init {bitrate}", r"CAN init ok bitrate=%d" % bitrate)
-        self.cmd("can echo off", r"CAN echo off")
-        self.cmd("can print on", r"CAN print on")
-        self.cmd("can clear", r"CAN counters cleared")
-
-    def expect_rx(self, can_id, data=b"", ext=False, timeout=3.0):
-        """Wait for the node to print a received frame."""
-        pat = r"CAN rx id=0x%X ext=%d rtr=0 dlc=%d data=%s\r\n" % (
-            can_id, int(ext), len(data), bytes(data).hex().upper())
-        return self.uart.expect(re.compile(pat), timeout=timeout)
-
-
-@pytest.fixture(scope="module")
-def node(benchpod, wiring, pytestconfig):
-    """Flash (optional), power-cycle and boot the node; one UART session for the module."""
-    firmware = pytestconfig.getoption("benchpod_firmware")
-    if firmware:
-        result = _flash(benchpod, wiring, firmware)
-        assert result.ok, f"flash failed; openocd output:\n{result.stderr}"
-    benchpod.power_off(wiring.efuse)
-    benchpod.power_on(wiring.efuse, delay=1.5)
-    try:
-        with benchpod.open_uart(rx=wiring.uart_rx, tx=wiring.uart_tx) as uart:
-            n = Node(uart)
-            # The boot banner can be clipped on a slow link, so check the result by command.
-            uart.read_until("APP_OK", timeout=5)
-            if OSC_MHZ != 8:
-                n.cmd(f"can osc {OSC_MHZ}", r"CAN init (ok|fail)")
-            st = n.status()
-            assert st["chip"] == "ok", f"MCP2515 not answering on SPI: {st}"
-            yield n
-    finally:
-        benchpod.power_off(wiring.efuse)
 
 
 @pytest.fixture
