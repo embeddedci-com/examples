@@ -14,12 +14,17 @@
  *
  * Analog in:  PA1 (ADC1_IN1, Nucleo A1) <- pod 3.3 V DAC SMA via 5-10 kOhm.
  * Analog out: PA4 (DAC1_OUT1, Nucleo A2) -> pod ADC SMA (off until asked).
+ * Env sensor: BMP280 on I2C1 PB8 (SCL) / PB9 (SDA).
+ * Alarm out:  PB0 (Nucleo A3), high while any alarm is active; also UART "EVT"
+ *             lines and CAN frame 0x0A0 on every change.
  *
  * Console: USART1 PA9 (TX) / PA10 (RX), 115200 8N1. Type "help".
  */
 
 #include "stm32f4xx_hal.h"
+#include "alarm.h"
 #include "analog.h"
+#include "env.h"
 #include "mcp2515.h"
 #include "mcp2515_timing.h"
 #include "thermostat.h"
@@ -49,6 +54,10 @@
 #define CAN_TX_TIMEOUT_MS 50U    /* no ACK within this -> abort + report */
 #define CAN_BURST_MAX 1000U
 #define CAN_SERVICE_MAX_FRAMES 8U /* per main-loop pass, so the console stays responsive */
+
+#define ALARM_PORT GPIOB
+#define ALARM_PIN GPIO_PIN_0
+#define ALARM_CAN_ID 0x0A0U
 
 #define CS_PORT GPIOB
 #define CS_PIN GPIO_PIN_6
@@ -100,6 +109,9 @@ static periodic_t g_periodic;
 static const char *g_reset_cause = "unknown";
 static thermo_t g_thermo;
 static uint32_t g_thermo_next_ms;
+static const char *g_ctl_trip = "none";
+static alarm_t g_alarm;
+static uint32_t g_alarm_next_ms;
 
 void SystemClock_Config(void);
 static void USART1_Init(void);
@@ -121,6 +133,9 @@ static void print_info(void);
 static void handle_aout(char *args);
 static void handle_ctl(char *args);
 static void thermo_tick(uint32_t now_ms);
+static void alarm_out_init(void);
+static void alarm_tick(uint32_t now_ms);
+static void handle_alarm(char *args);
 
 int _write(int file, char *ptr, int len)
 {
@@ -159,6 +174,9 @@ int main(void)
     ain_init();
     aout_init();
     thermo_init(&g_thermo);
+    env_init();
+    alarm_init(&g_alarm);
+    alarm_out_init();
     printf("APP_OK\r\n");
     printf("type a command and press Enter (e.g. help)\r\n");
     print_prompt();
@@ -183,6 +201,8 @@ int main(void)
 
         ain_tick(HAL_GetTick());
         thermo_tick(HAL_GetTick());
+        env_tick(HAL_GetTick());
+        alarm_tick(HAL_GetTick());
 
         if (g_can.init_ok)
         {
@@ -695,6 +715,10 @@ static void process_command(char *cmd)
     {
         print_info();
     }
+    else if (strcmp(cmd, "alarm") == 0 || strncmp(cmd, "alarm ", 6) == 0)
+    {
+        handle_alarm(cmd + 5);
+    }
     else if (strcmp(cmd, "ctl") == 0 || strncmp(cmd, "ctl ", 4) == 0)
     {
         handle_ctl(cmd + 3);
@@ -744,6 +768,7 @@ static void print_help(void)
     printf("  ain                       analog input PA1: mV, raw, filtered, VDDA\r\n");
     printf("  aout [<mV> | sine <Hz> <amp-mV> <offset-mV> | off]   analog output PA4\r\n");
     printf("  ctl [on <degC> | off]     thermostat: PA1 sensor (0.5 V + 20 mV/degC) -> PI -> PA4\r\n");
+    printf("  alarm [limit <degC>]      alarms, env sensor (BMP280), over-temperature limit\r\n");
     printf("  status | can status       counters, mode, error state\r\n");
     printf("  can init [bitrate]        reset + configure the MCP2515 (default 500000)\r\n");
     printf("  can osc <MHz>             module crystal (8 or 16), then re-init\r\n");
@@ -868,9 +893,10 @@ static void print_ctl(void)
     printf("CTL mode=%s", g_thermo.on ? "on" : "off");
     print_dc("sp_c", g_thermo.sp_dc);
     print_dc("pv_c", proc_mv_to_dc(ain_state()->mv));
-    printf(" out_mv=%ld in_band_ms=%lu steps=%lu\r\n", (long)(g_thermo.on ? g_thermo.out_mv : 0),
+    printf(" out_mv=%ld in_band_ms=%lu steps=%lu trip=%s\r\n",
+           (long)(g_thermo.on ? g_thermo.out_mv : 0),
            (unsigned long)(g_thermo.in_band_steps * THERMO_PERIOD_MS),
-           (unsigned long)g_thermo.steps);
+           (unsigned long)g_thermo.steps, g_ctl_trip);
 }
 
 /* "60", "60.5", "-5.5" -> deci-degC. Returns 0 on success. */
@@ -934,6 +960,11 @@ static void handle_ctl(char *args)
         printf("CTL error: usage ctl on <degC 0..100, one decimal> | ctl off\r\n");
         return;
     }
+    if (g_alarm.active & ALARM_OVERTEMP)
+    {
+        printf("CTL error: over-temperature alarm active\r\n");
+        return;
+    }
     const aout_state_t *a = aout_state();
     int32_t current = (a->mode == AOUT_DC) ? (int32_t)a->mv : THERMO_OUT_MIN_MV;
     int was_on = g_thermo.on;
@@ -942,12 +973,113 @@ static void handle_ctl(char *args)
         printf("CTL error: setpoint out of range 0.0..100.0 degC\r\n");
         return;
     }
+    g_ctl_trip = "none";
     if (!was_on)
     {
         (void)aout_dc((uint32_t)g_thermo.out_mv);
         g_thermo_next_ms = HAL_GetTick();
     }
     print_ctl();
+}
+
+/* ---------------------------------------------------------------- alarms */
+
+static void alarm_out_init(void)
+{
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    ALARM_PORT->BSRR = (uint32_t)ALARM_PIN << 16U; /* low before it becomes an output */
+    GPIO_InitTypeDef g = {0};
+    g.Pin = ALARM_PIN;
+    g.Mode = GPIO_MODE_OUTPUT_PP;
+    g.Pull = GPIO_NOPULL;
+    g.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(ALARM_PORT, &g);
+}
+
+static void alarm_tick(uint32_t now_ms)
+{
+    if ((int32_t)(now_ms - g_alarm_next_ms) < 0)
+    {
+        return;
+    }
+    g_alarm_next_ms = now_ms + ENV_PERIOD_MS;
+
+    const env_state_t *e = env_state();
+    alarm_in_t in = {
+        .env_ok = (e->status == ENV_OK && e->reads > 0U) ? 1U : 0U,
+        .env_lost = (e->status == ENV_LOST) ? 1U : 0U,
+        .env_dc = e->temp_dc,
+        .regulating = g_thermo.on,
+        .pv_mv = ain_state()->mv,
+    };
+    uint8_t changed = alarm_eval(&g_alarm, &in);
+    if (!changed)
+    {
+        return;
+    }
+
+    /* Outputs first, reporting after: the pin and the trip must not wait on the UART. */
+    ALARM_PORT->BSRR = g_alarm.active ? ALARM_PIN : ((uint32_t)ALARM_PIN << 16U);
+    uint8_t trip = g_alarm.active & (ALARM_OVERTEMP | ALARM_PV_FAULT);
+    if (g_thermo.on && trip)
+    {
+        thermo_stop(&g_thermo);
+        aout_off(); /* heater off */
+        g_ctl_trip = alarm_name((trip & ALARM_OVERTEMP) ? ALARM_OVERTEMP : ALARM_PV_FAULT);
+    }
+    if (g_can.init_ok)
+    {
+        int16_t t = (int16_t)e->temp_dc;
+        can_frame_t f = {.id = ALARM_CAN_ID, .dlc = 4U,
+                         .data = {g_alarm.active, changed, (uint8_t)t, (uint8_t)((uint16_t)t >> 8)}};
+        (void)can_send(&f);
+    }
+    for (uint32_t i = 0; i < ALARM_COUNT; i++)
+    {
+        uint8_t bit = (uint8_t)(1U << i);
+        if (changed & bit)
+        {
+            printf("\r\nEVT alarm %s=%s active=0x%02X\r\n", (g_alarm.active & bit) ? "set" : "clear",
+                   alarm_name(bit), g_alarm.active);
+        }
+    }
+    if (strcmp(g_ctl_trip, "none") != 0 && !g_thermo.on && (changed & trip))
+    {
+        printf("EVT ctl trip=%s heater=off\r\n", g_ctl_trip);
+    }
+}
+
+static void print_alarm(void)
+{
+    const env_state_t *e = env_state();
+    static const char *const env_names[] = {"absent", "ok", "lost"};
+    printf("ALARM active=0x%02X overtemp=%u pv_fault=%u env_lost=%u", g_alarm.active,
+           (g_alarm.active & ALARM_OVERTEMP) ? 1U : 0U, (g_alarm.active & ALARM_PV_FAULT) ? 1U : 0U,
+           (g_alarm.active & ALARM_ENV_LOST) ? 1U : 0U);
+    print_dc("limit_c", g_alarm.limit_dc);
+    printf(" env=%s", env_names[e->status]);
+    print_dc("env_c", e->temp_dc);
+    printf(" press_pa=%lu events=%lu\r\n", (unsigned long)e->press_pa,
+           (unsigned long)g_alarm.events);
+}
+
+static void handle_alarm(char *args)
+{
+    char *a0 = strtok(args, " ");
+    if (a0 == NULL)
+    {
+        print_alarm();
+        return;
+    }
+    int32_t lim;
+    if (strcmp(a0, "limit") != 0 || parse_dc(strtok(NULL, " "), &lim) != 0 ||
+        lim < ALARM_LIMIT_MIN_DC || lim > ALARM_LIMIT_MAX_DC)
+    {
+        printf("ALARM error: usage alarm [limit <degC -40..85, one decimal>]\r\n");
+        return;
+    }
+    g_alarm.limit_dc = lim;
+    print_alarm();
 }
 
 /* ---------------------------------------------------------------- lifecycle */

@@ -24,79 +24,12 @@ import time
 
 import pytest
 
-from embeddedci.benchpod import LoopInputMap
-
-AMBIENT_C = 20.0
-C_PER_MV = 0.03
-SENSOR_MV_AT_0C = 500.0
-SENSOR_MV_PER_C = 20.0
-HEATER_MAX_MV = 3000.0
-SENSOR_MAX_MV = 3000.0      # the plant never drives PA1 above this
-POINTS = 256
-# Fabric lag: tick = 65535 / 48 MHz = 1.37 ms, k = 150/32768 per tick -> tau ~ 0.3 s.
-TICK_DIV = 65535
-K = 150
+from conftest import AMBIENT_C, C_PER_MV
 
 SETTLE_S = 6.0              # host sim: ~1.1 s; margin for console round trips over the cloud
 IN_BAND_MS = 1000           # "settled" = 1 s continuously within 1 degC (the node counts it)
 MAX_OVERSHOOT_C = 3.0
 HOLD_TOL_C = 1.0
-
-
-def _sensor_mv(temp_c):
-    return SENSOR_MV_AT_0C + SENSOR_MV_PER_C * temp_c
-
-
-@pytest.fixture
-def plant(benchpod, wiring, node):
-    """Calibrate the pod's 3.3 V output against the node's ADC, then provide ``arm(ambient_c)``
-    which (re)loads the thermal plant curve. Everything is stopped and parked afterwards."""
-    if not wiring.analog:
-        pytest.skip("PROCESS_NODE_ANALOG=0: the thermostat needs both analog leads")
-    caps = benchpod.capabilities
-    if not (caps.dac_control_loop and caps.dac_loop_input_map):
-        pytest.skip("pod gateware has no control loop with an input map")
-    node.ctl("off")
-
-    def mv_at_pa1(code):
-        benchpod.dac_output(wiring.ain_path)
-        with benchpod.control_loop(curve=[code] * POINTS, source="fixed", input_code=0,
-                                   k=32767, tick_div=64):
-            time.sleep(0.2)
-            return statistics.mean(node.ain()["mv"] for _ in range(3))
-
-    # Two-point fit of the 3.3 V output path, code -> mV at PA1 (through the 5-10 kOhm).
-    c1, c2 = 10000, 30000
-    m1, m2 = mv_at_pa1(c1), mv_at_pa1(c2)
-    assert m2 - m1 > 300, f"pod 3.3 V output does not reach PA1: {c1}->{m1:.0f} mV, {c2}->{m2:.0f} mV"
-    mv_per_code = (m2 - m1) / (c2 - c1)
-
-    def code_for(mv):
-        return max(0, min(65535, round(c1 + (mv - m1) / mv_per_code)))
-
-    vmax = code_for(SENSOR_MAX_MV)
-    state = {}
-
-    def arm(ambient_c):
-        curve = []
-        for i in range(POINTS):
-            heater_mv = HEATER_MAX_MV * 1.1 * i / (POINTS - 1)  # input axis 0..3.3 V
-            temp = ambient_c + C_PER_MV * heater_mv
-            curve.append(min(vmax, code_for(_sensor_mv(temp))))
-        # Arming starts the output at vmin: make that the ambient, never below it.
-        vmin = min(vmax, code_for(_sensor_mv(ambient_c)))
-        benchpod.dac_output(wiring.ain_path)  # a stopped loop may have parked the output
-        state["loop"] = benchpod.control_loop(
-            curve=curve, source="adc", k=K, tick_div=TICK_DIV, vmin=vmin, vmax=vmax,
-            input_map=LoopInputMap(mv_per_unit=1.0, range_min=0.0, range_max=HEATER_MAX_MV * 1.1))
-        return state["loop"]
-
-    try:
-        yield arm
-    finally:
-        node.ctl("off")
-        benchpod.dac_stop()
-        benchpod.dac_output("off")
 
 
 def _wait_settled(node, setpoint_c, timeout=SETTLE_S, disturbed=False):

@@ -2,6 +2,8 @@
  * simulated plant). Run: make test-host */
 #include "proc.h"
 #include "thermostat.h"
+#include "alarm.h"
+#include "bmp280_comp.h"
 #include "sim_thermostat.c"
 #include <stdio.h>
 #include <stdlib.h>
@@ -141,6 +143,56 @@ int main(void)
     {
         expect_near("recovers without windup", pv[i], 400, 10);
     }
+
+    /* BMP280 compensation: the datasheet's worked example (section 8.2). */
+    bmp280_calib_t cal = {27504, 26435, -1000, 36477, -10685, 3024, 2855, 140, -7, 15500, -14600, 6000};
+    int32_t t_fine;
+    expect_eq("bmp280 temp", bmp280_temp_cdc(&cal, 519888, &t_fine), 2508);
+    expect_eq("bmp280 t_fine", t_fine, 128422);
+    expect_eq("bmp280 press", bmp280_press_pa(&cal, 415148, t_fine), 100653);
+    uint8_t raw[24] = {0x70, 0x6B, 0x43, 0x67, 0x18, 0xFC};
+    bmp280_calib_t parsed;
+    bmp280_calib_parse(raw, &parsed);
+    expect_eq("calib t1", parsed.t1, 27504);
+    expect_eq("calib t2", parsed.t2, 26435);
+    expect_eq("calib t3", parsed.t3, -1000);
+
+    /* Alarms: debounce, hysteresis, hold while the sensor is gone, pv only while regulating. */
+    alarm_t al;
+    alarm_init(&al);
+    alarm_in_t in = {.env_ok = 1, .env_dc = 250, .pv_mv = 1000};
+    expect_eq("quiet", alarm_eval(&al, &in), 0);
+    in.env_dc = 510;
+    expect_eq("one hot sample is not enough", alarm_eval(&al, &in), 0);
+    in.env_dc = 250;
+    expect_eq("spike forgotten", alarm_eval(&al, &in), 0);
+    in.env_dc = 510;
+    (void)alarm_eval(&al, &in);
+    expect_eq("overtemp after 2", alarm_eval(&al, &in), ALARM_OVERTEMP);
+    expect_eq("active", al.active, ALARM_OVERTEMP);
+    in.env_dc = 490; /* inside the hysteresis band */
+    expect_eq("hyst 1", alarm_eval(&al, &in), 0);
+    expect_eq("hyst 2", alarm_eval(&al, &in), 0);
+    in.env_dc = 0; /* sensor gone while hot: hold */
+    in.env_ok = 0;
+    in.env_lost = 1;
+    (void)alarm_eval(&al, &in);
+    expect_eq("env lost after 2", alarm_eval(&al, &in), ALARM_ENV_LOST);
+    expect_eq("overtemp held", al.active, ALARM_OVERTEMP | ALARM_ENV_LOST);
+    in.env_ok = 1;
+    in.env_lost = 0;
+    in.env_dc = 470;
+    (void)alarm_eval(&al, &in);
+    expect_eq("both clear", alarm_eval(&al, &in), ALARM_OVERTEMP | ALARM_ENV_LOST);
+    in.pv_mv = 50; /* open sensor, not regulating: nothing */
+    (void)alarm_eval(&al, &in);
+    expect_eq("pv ignored when idle", alarm_eval(&al, &in), 0);
+    in.regulating = 1;
+    (void)alarm_eval(&al, &in);
+    expect_eq("pv fault", alarm_eval(&al, &in), ALARM_PV_FAULT);
+    in.pv_mv = 3200;
+    expect_eq("pv high still fault", alarm_eval(&al, &in), 0);
+    expect_eq("events", al.events, 4);
 
     if (failures)
     {

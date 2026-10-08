@@ -35,6 +35,14 @@ practice; `can selftest` checks it. If it is ever flaky, put a TXS0108E in betwe
   `PROCESS_NODE_ANALOG=0` to skip the analog tests.
 - Analog out: **PA4 (Nucleo A2) -> pod ADC SMA**. The node keeps PA4 off (high-Z) unless a
   test turns it on, because the pod's own analog tests expect that SMA quiet.
+- Environment sensor: BMP280 on I2C1, **PB8 (SCL) -> LA1, PB9 (SDA) -> LA2**; on the bench the
+  pod emulates it. Probed at 0x76/0x77, read every 200 ms, re-probed every second while absent.
+- Alarm output: **PB0 (Nucleo A3) -> LA5**, high while any alarm is active. Every alarm
+  change also prints `EVT alarm set=<name>|clear=<name> active=0x..` and sends CAN frame
+  0x0A0 `[active, changed, temp lo, temp hi]` (deci-degC). Alarms (debounced, 2 readings):
+  `overtemp` (env above the limit, default 50 degC, clears 2 degC below), `pv_fault` (PA1
+  out of 0.3-3.1 V while regulating), `env_lost`. Over-temperature and `pv_fault` trip the
+  thermostat: heater off, latched until the next `ctl on` (refused while over-temperature).
 - Console: USART1 PA9 (TX) to pod LA3, PA10 (RX) to pod LA4, 115200 8N1.
   SWD: SWCLK LA11, SWDIO LA12.
 
@@ -56,6 +64,7 @@ With 8 MHz the fastest bitrate is 500 kbit/s; 1 Mbit/s needs a 16 MHz crystal.
 | `ain` | `AIN mv=... raw=... filt_mv=... vdda_mv=... samples=...`: analog input PA1 |
 | `aout [<mV> \| sine <Hz> <amp-mV> <offset-mV> \| off]` | analog output PA4 (DAC, 0.2 V .. VDDA-0.2 V, sine by DDS at 10 kHz); off = high-Z |
 | `ctl [on <degC> \| off]` | thermostat: PA1 sensor (0.5 V + 20 mV/degC) -> PI at 50 Hz -> PA4 heater; `CTL mode=... sp_c=... pv_c=... out_mv=... in_band_ms=...` |
+| `alarm [limit <degC>]` | `ALARM active=0x.. overtemp= pv_fault= env_lost= limit_c= env=ok\|absent\|lost env_c= press_pa= events=` |
 | `wdt stall` | stop kicking the watchdog (~2 s timeout) so the IWDG resets the node |
 | `can status` | mode, bitrate, TEC/REC, error flags, counters |
 | `can init [bitrate]` | reset and configure the MCP2515 (default 500000) |
@@ -98,6 +107,11 @@ no host in the path). Open-loop plant check, settle and hold at a setpoint, a se
 change, an ambient drop it must reject, and refused setpoints. The gains come from the host
 simulation in `tests/sim_thermostat.c` (part of `make test-host`), which models the fabric's
 integer damping.
+
+`tests/test_alarms.py`: the pod's emulated BMP280 drives the alarms: readings,
+over-temperature on PB0 + UART + CAN with hysteresis, a spike the debounce ignores, the
+heater trip and no restart while hot, a shorted process sensor while regulating, and the
+sensor going missing and coming back.
 
 `tests/test_can_hil.py`: both directions with standard and extended ids and 0 to 8 bytes, request/response
 (echo), periodic timing from the pod's timestamps, bursts within and beyond the pod's RX

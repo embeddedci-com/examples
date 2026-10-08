@@ -7,14 +7,30 @@ analog and lifecycle files share one boot.
 
 import os
 import re
+import statistics
+import time
 from types import SimpleNamespace
 
 import pytest
+
+from embeddedci.benchpod import LoopInputMap
 
 TARGET_CFG = "target/stm32f4x.cfg"
 FLASH_ATTEMPTS = 3
 OSC_MHZ = int(os.environ.get("CAN_NODE_OSC_MHZ", "8"))
 BITRATE = 500_000
+
+# The thermal plant the pod emulates for the thermostat (test_thermostat.py, test_alarms.py).
+AMBIENT_C = 20.0
+C_PER_MV = 0.03
+SENSOR_MV_AT_0C = 500.0
+SENSOR_MV_PER_C = 20.0
+HEATER_MAX_MV = 3000.0
+SENSOR_MAX_MV = 3000.0      # the plant never drives PA1 above this
+POINTS = 256
+# Fabric lag: tick = 65535 / 48 MHz = 1.37 ms, k = 150/32768 per tick -> tau ~ 0.3 s.
+TICK_DIV = 65535
+K = 150
 
 
 @pytest.fixture(scope="session")
@@ -33,6 +49,9 @@ def wiring(pins):
         uart_rx=pins.pin_3,   # pod samples the DUT's TX here
         uart_tx=pins.pin_4,   # pod drives the DUT's RX here
         efuse=pins.efuse,
+        i2c_scl=pins.pin_1,   # PB8, the pod emulates the BMP280 here
+        i2c_sda=pins.pin_2,   # PB9
+        alarm=pins.pin_5,     # PB0, high while any alarm is active
         # Analog in: pod 3.3 V DAC SMA -> 5-10 kOhm -> PA1 (Nucleo A1). PROCESS_NODE_ANALOG=0 on a
         # bench without that lead skips the analog tests instead of failing them.
         ain_path="3v3",
@@ -100,8 +119,25 @@ class Node:
         assert not body.startswith("error"), f"ctl {args}: {body}"
         out = {}
         for k, v in (kv.split("=", 1) for kv in body.split()):
-            out[k] = v if k == "mode" else float(v) if k.endswith("_c") else int(v)
+            out[k] = v if k in ("mode", "trip") else float(v) if k.endswith("_c") else int(v)
         return out
+
+    def alarm(self, args=""):
+        """Run ``alarm <args>``; returns active (int), flags, limit_c/env_c (float), env (str)..."""
+        m = self.cmd(f"alarm {args}".strip(), r"ALARM ([^\r\n]*)\r\n")
+        body = m.group(1)
+        assert not body.startswith("error"), f"alarm {args}: {body}"
+        out = {}
+        for k, v in (kv.split("=", 1) for kv in body.split()):
+            out[k] = (v if k == "env" else int(v, 16) if k == "active"
+                      else float(v) if k.endswith("_c") else int(v))
+        return out
+
+    def reboot(self, timeout=3.0):
+        """Software reset and wait for the boot marker: back to power-on defaults."""
+        self.cmd("reset", r"RESET: rebooting")
+        self.uart.read_until("APP_OK", timeout=timeout)
+        time.sleep(0.2)
 
     def status(self):
         m = self.cmd("can status", r"CAN status: ([^\r\n]*)\r\n")
@@ -143,3 +179,65 @@ def node(benchpod, wiring, pytestconfig):
         benchpod.power_off(wiring.efuse)
 
 
+def _sensor_mv(temp_c):
+    return SENSOR_MV_AT_0C + SENSOR_MV_PER_C * temp_c
+
+
+@pytest.fixture
+def plant(benchpod, wiring, node):
+    """The thermal process the thermostat regulates, emulated by the pod's in-fabric loop (see
+    test_thermostat.py). Calibrates the pod's 3.3 V output against the node's ADC, then returns a
+    callable: ``plant(ambient_c)`` (re)loads the plant curve; ``plant.short_sensor()`` replaces the
+    process with a sensor shorted to ground (0 V on PA1). Everything is stopped afterwards."""
+    if not wiring.analog:
+        pytest.skip("PROCESS_NODE_ANALOG=0: the thermostat needs both analog leads")
+    caps = benchpod.capabilities
+    if not (caps.dac_control_loop and caps.dac_loop_input_map):
+        pytest.skip("pod gateware has no control loop with an input map")
+    node.ctl("off")
+
+    def mv_at_pa1(code):
+        benchpod.dac_output(wiring.ain_path)
+        with benchpod.control_loop(curve=[code] * POINTS, source="fixed", input_code=0,
+                                   k=32767, tick_div=64):
+            time.sleep(0.2)
+            return statistics.mean(node.ain()["mv"] for _ in range(3))
+
+    # Two-point fit of the 3.3 V output path, code -> mV at PA1 (through the 5-10 kOhm).
+    c1, c2 = 10000, 30000
+    m1, m2 = mv_at_pa1(c1), mv_at_pa1(c2)
+    assert m2 - m1 > 300, f"pod 3.3 V output does not reach PA1: {c1}->{m1:.0f} mV, {c2}->{m2:.0f} mV"
+    mv_per_code = (m2 - m1) / (c2 - c1)
+
+    def code_for(mv):
+        return max(0, min(65535, round(c1 + (mv - m1) / mv_per_code)))
+
+    vmax = code_for(SENSOR_MAX_MV)
+    state = {}
+
+    def arm(ambient_c):
+        curve = []
+        for i in range(POINTS):
+            heater_mv = HEATER_MAX_MV * 1.1 * i / (POINTS - 1)  # input axis 0..3.3 V
+            temp = ambient_c + C_PER_MV * heater_mv
+            curve.append(min(vmax, code_for(_sensor_mv(temp))))
+        # Arming starts the output at vmin: make that the ambient, never below it.
+        vmin = min(vmax, code_for(_sensor_mv(ambient_c)))
+        benchpod.dac_output(wiring.ain_path)  # a stopped loop may have parked the output
+        state["loop"] = benchpod.control_loop(
+            curve=curve, source="adc", k=K, tick_div=TICK_DIV, vmin=vmin, vmax=vmax,
+            input_map=LoopInputMap(mv_per_unit=1.0, range_min=0.0, range_max=HEATER_MAX_MV * 1.1))
+        return state["loop"]
+
+    def short_sensor():
+        benchpod.dac_output(wiring.ain_path)
+        state["loop"] = benchpod.control_loop(curve=[0] * POINTS, source="fixed", input_code=0,
+                                              k=32767, tick_div=64, vmin=0, vmax=0)
+
+    arm.short_sensor = short_sensor
+    try:
+        yield arm
+    finally:
+        node.ctl("off")
+        benchpod.dac_stop()
+        benchpod.dac_output("off")

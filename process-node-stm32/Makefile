@@ -46,13 +46,15 @@ LDFLAGS := \
 	-specs=nano.specs \
 	-specs=nosys.specs
 
-APP_SRCS := main.c analog.c mcp2515.c syscalls.c sysmem.c system_stm32f4xx.c
+APP_SRCS := main.c analog.c env.c mcp2515.c syscalls.c sysmem.c system_stm32f4xx.c
 
 HAL_SRCS := \
 	stm32f4xx_hal.c \
 	stm32f4xx_hal_cortex.c \
 	stm32f4xx_hal_dma.c \
 	stm32f4xx_hal_gpio.c \
+	stm32f4xx_hal_i2c.c \
+	stm32f4xx_hal_i2c_ex.c \
 	stm32f4xx_hal_rcc.c \
 	stm32f4xx_hal_rcc_ex.c \
 	stm32f4xx_hal_pwr.c \
@@ -68,7 +70,7 @@ all: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).bin $(BUILD_DIR)/$(TARGET
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/%.o: %.c mcp2515.h mcp2515_timing.h analog.h proc.h sine_table.h thermostat.h | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: %.c mcp2515.h mcp2515_timing.h analog.h proc.h sine_table.h thermostat.h env.h alarm.h bmp280_comp.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/%.o: $(HAL_DIR)/Src/%.c | $(BUILD_DIR)
