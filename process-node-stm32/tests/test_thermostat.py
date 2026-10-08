@@ -13,8 +13,10 @@ Plant: ambient 20 degC, +0.03 degC per mV of heater drive (3.0 V -> 110 degC). T
 the host simulation in tests/sim_thermostat.c, which the controller gains were picked against.
 
 Checked: the open-loop plant itself (heater at minimum -> ambient), settling to a setpoint without
-much overshoot, holding it, a setpoint change, and rejecting a disturbance (the ambient drops 10 degC
-while it runs, like a door opening).
+much overshoot, holding it, a setpoint change, and rejecting a disturbance: the ambient drops 10 degC
+while it runs. Loading the new curve re-arms the pod's loop, which restarts its output at vmin, and
+vmin is the ambient temperature (the process cannot get colder), so the disturbance is the whole
+process dropping to the new ambient at once, like a cold load put in the oven.
 """
 
 import statistics
@@ -81,9 +83,11 @@ def plant(benchpod, wiring, node):
             heater_mv = HEATER_MAX_MV * 1.1 * i / (POINTS - 1)  # input axis 0..3.3 V
             temp = ambient_c + C_PER_MV * heater_mv
             curve.append(min(vmax, code_for(_sensor_mv(temp))))
+        # Arming starts the output at vmin: make that the ambient, never below it.
+        vmin = min(vmax, code_for(_sensor_mv(ambient_c)))
         benchpod.dac_output(wiring.ain_path)  # a stopped loop may have parked the output
         state["loop"] = benchpod.control_loop(
-            curve=curve, source="adc", k=K, tick_div=TICK_DIV, vmin=0, vmax=vmax,
+            curve=curve, source="adc", k=K, tick_div=TICK_DIV, vmin=vmin, vmax=vmax,
             input_map=LoopInputMap(mv_per_unit=1.0, range_min=0.0, range_max=HEATER_MAX_MV * 1.1))
         return state["loop"]
 
@@ -95,14 +99,19 @@ def plant(benchpod, wiring, node):
         benchpod.dac_output("off")
 
 
-def _wait_settled(node, setpoint_c, timeout=SETTLE_S):
-    """Poll the node until it reports IN_BAND_MS in band; returns (seconds, peak pv, trace)."""
+def _wait_settled(node, setpoint_c, timeout=SETTLE_S, disturbed=False):
+    """Poll the node until it reports IN_BAND_MS in band; returns (seconds, peak pv, trace).
+
+    ``disturbed``: the node was in band before a disturbance, so its in-band time must first
+    drop (it saw the disturbance) before a long in-band time counts as settling again."""
     start = time.monotonic()
     trace = []
+    seen = not disturbed
     while time.monotonic() - start < timeout:
         st = node.ctl()
         trace.append((round(time.monotonic() - start, 2), st["pv_c"], st["out_mv"]))
-        if st["in_band_ms"] >= IN_BAND_MS:
+        seen = seen or st["in_band_ms"] < IN_BAND_MS
+        if seen and st["in_band_ms"] >= IN_BAND_MS:
             return time.monotonic() - start, max(p for _, p, _ in trace), trace
         time.sleep(0.1)
     pytest.fail(f"not settled at {setpoint_c} degC within {timeout} s; (t, pv, out): {trace}")
@@ -164,8 +173,10 @@ def test_rejects_ambient_drop(node, plant):
     node.ctl("on 60")
     _wait_settled(node, 60.0)
     _, out_before, _ = _hold(node, n=5)
+    assert node.ctl()["in_band_ms"] >= IN_BAND_MS
     plant(AMBIENT_C - 10.0)  # reload the curve while the node keeps regulating
-    _wait_settled(node, 60.0)
+    _, _, trace = _wait_settled(node, 60.0, disturbed=True)
+    assert min(p for _, p, _ in trace) < 60.0 - HOLD_TOL_C, f"the node never saw the drop: {trace}"
     pv, out_after, pvs = _hold(node)
     assert abs(pv - 60.0) <= HOLD_TOL_C, f"holding {pv:.2f} degC after the drop, readings {pvs}"
     extra = out_after - out_before
