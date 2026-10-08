@@ -1,6 +1,6 @@
 /*
- * STM32 CAN node: NUCLEO-F446RE + MCP2515/TJA1050 module, driven from a UART
- * console so a BenchPod (or a person) can make it talk on the bus.
+ * Process-control node: NUCLEO-F446RE + MCP2515/TJA1050 module, driven from a
+ * UART console so a BenchPod (or a person) can exercise it like a real product.
  *
  * Wiring (Nucleo Arduino header -> MCP2515 module, direct):
  *   D13 PA5  SPI1_SCK  -> SCK
@@ -12,18 +12,38 @@
  * The module's TJA1050 needs 5 V, which makes its SPI outputs 5 V too; PA6 and
  * PC7 are 5 V tolerant. A TXS0108E in between is optional (see README).
  *
+ * Analog in:  PA1 (ADC1_IN1, Nucleo A1) <- pod 3.3 V DAC SMA via 5-10 kOhm.
+ * Analog out: PA4 (DAC1_OUT1, Nucleo A2) -> pod ADC SMA (off until asked).
+ * Env sensor: BMP280 on I2C1 PB8 (SCL) / PB9 (SDA).
+ * Alarm out:  PB0 (Nucleo A3), high while any alarm is active; also UART "EVT"
+ *             lines and CAN frame 0x0A0 on every change.
+ * Strobe:     PA8 (Nucleo D7), high while the selected task runs (ADC sample or
+ *             env read), or toggled per control step (too short for a pulse),
+ *             so a logic analyzer can time it.
+ *
  * Console: USART1 PA9 (TX) / PA10 (RX), 115200 8N1. Type "help".
  */
 
 #include "stm32f4xx_hal.h"
+#include "alarm.h"
+#include "analog.h"
+#include "env.h"
 #include "mcp2515.h"
 #include "mcp2515_timing.h"
+#include "thermostat.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#define FW_NAME "process-node"
+#define FW_VERSION "0.2.0"
+
 #define CMD_BUF_SIZE 96
+
+/* Independent watchdog: LSI ~32 kHz / 64 = 500 Hz, reload 1000 -> ~2 s. The main
+ * loop kicks it every pass; long blocking work (CAN bursts) kicks it as it goes. */
+#define IWDG_RELOAD 1000U
 
 /* Boot attach window (ms): hold before touching peripherals so a flasher that
  * just reset us can connect SWD during a known-quiet window. */
@@ -37,6 +57,12 @@
 #define CAN_TX_TIMEOUT_MS 50U    /* no ACK within this -> abort + report */
 #define CAN_BURST_MAX 1000U
 #define CAN_SERVICE_MAX_FRAMES 8U /* per main-loop pass, so the console stays responsive */
+
+#define ALARM_PORT GPIOB
+#define ALARM_PIN GPIO_PIN_0
+#define ALARM_CAN_ID 0x0A0U
+#define STROBE_PORT GPIOA
+#define STROBE_PIN GPIO_PIN_8
 
 #define CS_PORT GPIOB
 #define CS_PIN GPIO_PIN_6
@@ -85,6 +111,24 @@ static can_state_t g_can = {
     .print = 1U,
 };
 static periodic_t g_periodic;
+static const char *g_reset_cause = "unknown";
+static uint32_t g_boot_ms; /* ms from reset release to APP_OK */
+static thermo_t g_thermo;
+static uint32_t g_thermo_next_ms;
+static const char *g_ctl_trip = "none";
+static alarm_t g_alarm;
+static uint32_t g_alarm_next_ms;
+static uint32_t g_alarm_env_seq;
+
+typedef enum
+{
+    STROBE_OFF = 0,
+    STROBE_AIN,
+    STROBE_CTL,
+    STROBE_ENV,
+} strobe_mode_t;
+static strobe_mode_t g_strobe;
+static const char *const STROBE_NAMES[] = {"off", "ain", "ctl", "env"};
 
 void SystemClock_Config(void);
 static void USART1_Init(void);
@@ -99,6 +143,18 @@ static void can_service(void);
 static void can_periodic_tick(void);
 static void can_print_status(void);
 static void handle_can(char *args);
+static void reset_cause_capture(void);
+static void iwdg_start(void);
+static void iwdg_kick(void);
+static void print_info(void);
+static void handle_aout(char *args);
+static void handle_ctl(char *args);
+static void thermo_tick(uint32_t now_ms);
+static void alarm_out_init(void);
+static void alarm_tick(uint32_t now_ms);
+static void handle_alarm(char *args);
+static void strobe_init(void);
+static void handle_strobe(char *args);
 
 int _write(int file, char *ptr, int len)
 {
@@ -115,28 +171,40 @@ int _write(int file, char *ptr, int len)
 
 int main(void)
 {
+    reset_cause_capture();
     HAL_Init();
     SystemClock_Config();
 
     HAL_DBGMCU_EnableDBGSleepMode();
     HAL_DBGMCU_EnableDBGStopMode();
     HAL_DBGMCU_EnableDBGStandbyMode();
+    DBGMCU->APB1FZ |= DBGMCU_APB1_FZ_DBG_IWDG_STOP; /* a halted core must not be reset */
     HAL_Delay(FLASH_ATTACH_WINDOW_MS);
+    iwdg_start();
 
     USART1_Init();
     SPI1_Init();
     (void)setvbuf(stdout, NULL, _IONBF, 0);
 
-    printf("\r\nCAN-NODE: stm32f446 + mcp2515\r\n");
-    printf("CAN-NODE: build=%s %s\r\n", __DATE__, __TIME__);
-    printf("CAN-NODE: uart=USART1(115200), spi=SPI1 PA5/PA6/PA7, cs=PB6, int=PC7\r\n");
+    printf("\r\nPROCESS-NODE: stm32f446 + mcp2515\r\n");
+    print_info();
+    printf("PROCESS-NODE: uart=USART1(115200), spi=SPI1 PA5/PA6/PA7, cs=PB6, int=PC7\r\n");
     can_init(g_can.bitrate);
+    ain_init();
+    aout_init();
+    thermo_init(&g_thermo);
+    env_init();
+    alarm_init(&g_alarm);
+    alarm_out_init();
+    strobe_init();
+    g_boot_ms = HAL_GetTick();
     printf("APP_OK\r\n");
     printf("type a command and press Enter (e.g. help)\r\n");
     print_prompt();
 
     while (1)
     {
+        iwdg_kick();
         uint8_t b;
         while (usart1_read_byte_nonblocking(&b))
         {
@@ -151,6 +219,30 @@ int main(void)
             cmd_index = 0;
             print_prompt();
         }
+
+        uint32_t now = HAL_GetTick();
+        int mark = (g_strobe == STROBE_AIN) && ain_due(now);
+        if (mark)
+        {
+            STROBE_PORT->BSRR = STROBE_PIN;
+        }
+        ain_tick(now);
+        if (mark)
+        {
+            STROBE_PORT->BSRR = (uint32_t)STROBE_PIN << 16U;
+        }
+        thermo_tick(now);
+        mark = (g_strobe == STROBE_ENV) && env_due(now);
+        if (mark)
+        {
+            STROBE_PORT->BSRR = STROBE_PIN;
+        }
+        env_tick(now);
+        if (mark)
+        {
+            STROBE_PORT->BSRR = (uint32_t)STROBE_PIN << 16U;
+        }
+        alarm_tick(now); /* right after the read, so an alarm follows its reading at once */
 
         if (g_can.init_ok)
         {
@@ -254,6 +346,7 @@ static void print_frame(const char *tag, const can_frame_t *f)
 
 static mcp_tx_result_t can_send(const can_frame_t *f)
 {
+    iwdg_kick(); /* bursts send up to CAN_BURST_MAX frames from one command */
     mcp_tx_result_t r = mcp_send(f, CAN_TX_TIMEOUT_MS);
     if (r == MCP_TX_OK)
     {
@@ -658,6 +751,42 @@ static void process_command(char *cmd)
     {
         can_print_status();
     }
+    else if (strcmp(cmd, "info") == 0)
+    {
+        print_info();
+    }
+    else if (strcmp(cmd, "strobe") == 0 || strncmp(cmd, "strobe ", 7) == 0)
+    {
+        handle_strobe(cmd + 6);
+    }
+    else if (strcmp(cmd, "alarm") == 0 || strncmp(cmd, "alarm ", 6) == 0)
+    {
+        handle_alarm(cmd + 5);
+    }
+    else if (strcmp(cmd, "ctl") == 0 || strncmp(cmd, "ctl ", 4) == 0)
+    {
+        handle_ctl(cmd + 3);
+    }
+    else if (strcmp(cmd, "aout") == 0 || strncmp(cmd, "aout ", 5) == 0)
+    {
+        handle_aout(cmd + 4);
+    }
+    else if (strcmp(cmd, "ain") == 0)
+    {
+        const ain_state_t *a = ain_read_now();
+        printf("AIN mv=%lu raw=%lu filt_mv=%lu vdda_mv=%lu samples=%lu\r\n", (unsigned long)a->mv,
+               (unsigned long)a->raw, (unsigned long)a->filt_mv, (unsigned long)a->vdda_mv,
+               (unsigned long)a->samples);
+    }
+    else if (strcmp(cmd, "wdt stall") == 0)
+    {
+        /* Lifecycle test hook: stop kicking the watchdog; it resets us in ~2 s and
+         * the next boot reports reset=iwdg. */
+        printf("WDT stall: waiting for the watchdog reset\r\n");
+        while (1)
+        {
+        }
+    }
     else if (strncmp(cmd, "can ", 4) == 0)
     {
         handle_can(cmd + 4);
@@ -679,6 +808,12 @@ static void process_command(char *cmd)
 static void print_help(void)
 {
     printf("commands:\r\n");
+    printf("  info                      firmware, version, uptime, reset cause\r\n");
+    printf("  ain                       analog input PA1: mV, raw, filtered, VDDA\r\n");
+    printf("  aout [<mV> | sine <Hz> <amp-mV> <offset-mV> | off]   analog output PA4\r\n");
+    printf("  ctl [on <degC> | off]     thermostat: PA1 sensor (0.5 V + 20 mV/degC) -> PI -> PA4\r\n");
+    printf("  alarm [limit <degC>]      alarms, env sensor (BMP280), over-temperature limit\r\n");
+    printf("  strobe [off|ain|ctl|env]  PA8 marks that task: high while ain/env runs, toggles per ctl step\r\n");
     printf("  status | can status       counters, mode, error state\r\n");
     printf("  can init [bitrate]        reset + configure the MCP2515 (default 500000)\r\n");
     printf("  can osc <MHz>             module crystal (8 or 16), then re-init\r\n");
@@ -693,6 +828,418 @@ static void print_help(void)
     printf("  can clear                 zero the counters\r\n");
     printf("  can regs                  dump MCP2515 registers\r\n");
     printf("  reset                     reboot the MCU\r\n");
+    printf("  wdt stall                 hang until the watchdog resets the MCU\r\n");
+}
+
+/* ---------------------------------------------------------------- analog out */
+
+static void print_aout(void)
+{
+    const aout_state_t *a = aout_state();
+    switch (a->mode)
+    {
+    case AOUT_DC:
+        printf("AOUT mode=dc mv=%lu code=%lu\r\n", (unsigned long)a->mv, (unsigned long)a->code);
+        break;
+    case AOUT_SINE:
+        printf("AOUT mode=sine hz=%lu amp_mv=%lu offset_mv=%lu\r\n", (unsigned long)a->hz,
+               (unsigned long)a->amp_mv, (unsigned long)a->mv);
+        break;
+    default:
+        printf("AOUT mode=off\r\n");
+        break;
+    }
+}
+
+static int parse_u32(const char *s, uint32_t *out)
+{
+    char *end;
+    if (s == NULL || *s == '\0')
+    {
+        return -1;
+    }
+    unsigned long v = strtoul(s, &end, 10);
+    if (*end != '\0')
+    {
+        return -1;
+    }
+    *out = (uint32_t)v;
+    return 0;
+}
+
+static void handle_aout(char *args)
+{
+    char *a0 = strtok(args, " ");
+    if (a0 == NULL)
+    {
+        print_aout();
+        return;
+    }
+    if (g_thermo.on)
+    {
+        thermo_stop(&g_thermo);
+        printf("CTL off: manual output\r\n");
+    }
+    if (strcmp(a0, "off") == 0)
+    {
+        aout_off();
+        print_aout();
+        return;
+    }
+    if (strcmp(a0, "sine") == 0)
+    {
+        uint32_t hz, amp, off;
+        if (parse_u32(strtok(NULL, " "), &hz) != 0 || parse_u32(strtok(NULL, " "), &amp) != 0 ||
+            parse_u32(strtok(NULL, " "), &off) != 0 || aout_sine(hz, amp, off) != 0)
+        {
+            printf("AOUT error: usage aout sine <1..%u Hz> <amp-mV> <offset-mV>, swing within "
+                   "%u mV .. VDDA-%u mV\r\n",
+                   (unsigned)AOUT_SINE_MAX_HZ, (unsigned)AOUT_MIN_MV, (unsigned)AOUT_HEADROOM_MV);
+            return;
+        }
+        print_aout();
+        return;
+    }
+    uint32_t mv;
+    if (parse_u32(a0, &mv) != 0 || aout_dc(mv) != 0)
+    {
+        printf("AOUT error: usage aout <mV> (%u .. VDDA-%u) | sine ... | off\r\n",
+               (unsigned)AOUT_MIN_MV, (unsigned)AOUT_HEADROOM_MV);
+        return;
+    }
+    print_aout();
+}
+
+/* ---------------------------------------------------------------- thermostat */
+
+static void thermo_tick(uint32_t now_ms)
+{
+    if (!g_thermo.on || (int32_t)(now_ms - g_thermo_next_ms) < 0)
+    {
+        return;
+    }
+    g_thermo_next_ms += THERMO_PERIOD_MS;
+    if ((int32_t)(now_ms - g_thermo_next_ms) >= 0)
+    {
+        g_thermo_next_ms = now_ms + THERMO_PERIOD_MS;
+    }
+    int32_t out = thermo_step(&g_thermo, ain_state()->mv);
+    (void)aout_dc((uint32_t)out); /* the controller clamps to the output's range */
+    if (g_strobe == STROBE_CTL)
+    {
+        STROBE_PORT->ODR ^= STROBE_PIN; /* one edge per step: a few us is too short a pulse */
+    }
+}
+
+static void print_dc(const char *key, int32_t dc)
+{
+    int32_t a = dc < 0 ? -dc : dc;
+    printf(" %s=%s%ld.%ld", key, dc < 0 ? "-" : "", (long)(a / 10), (long)(a % 10));
+}
+
+static void print_ctl(void)
+{
+    printf("CTL mode=%s", g_thermo.on ? "on" : "off");
+    print_dc("sp_c", g_thermo.sp_dc);
+    print_dc("pv_c", proc_mv_to_dc(ain_state()->mv));
+    printf(" out_mv=%ld in_band_ms=%lu steps=%lu trip=%s\r\n",
+           (long)(g_thermo.on ? g_thermo.out_mv : 0),
+           (unsigned long)(g_thermo.in_band_steps * THERMO_PERIOD_MS),
+           (unsigned long)g_thermo.steps, g_ctl_trip);
+}
+
+/* "60", "60.5", "-5.5" -> deci-degC. Returns 0 on success. */
+static int parse_dc(const char *s, int32_t *out)
+{
+    if (s == NULL || *s == '\0')
+    {
+        return -1;
+    }
+    int neg = (*s == '-');
+    if (neg)
+    {
+        s++;
+    }
+    char *end;
+    unsigned long whole = strtoul(s, &end, 10);
+    if (end == s)
+    {
+        return -1;
+    }
+    unsigned long tenth = 0UL;
+    if (*end == '.')
+    {
+        if (end[1] < '0' || end[1] > '9' || end[2] != '\0')
+        {
+            return -1;
+        }
+        tenth = (unsigned long)(end[1] - '0');
+    }
+    else if (*end != '\0')
+    {
+        return -1;
+    }
+    if (whole > 1000UL)
+    {
+        return -1;
+    }
+    int32_t v = (int32_t)(whole * 10UL + tenth);
+    *out = neg ? -v : v;
+    return 0;
+}
+
+static void handle_ctl(char *args)
+{
+    char *a0 = strtok(args, " ");
+    if (a0 == NULL)
+    {
+        print_ctl();
+        return;
+    }
+    if (strcmp(a0, "off") == 0)
+    {
+        thermo_stop(&g_thermo);
+        aout_off(); /* thermostat off = heater off */
+        print_ctl();
+        return;
+    }
+    int32_t sp;
+    if (strcmp(a0, "on") != 0 || parse_dc(strtok(NULL, " "), &sp) != 0)
+    {
+        printf("CTL error: usage ctl on <degC 0..100, one decimal> | ctl off\r\n");
+        return;
+    }
+    if (g_alarm.active & ALARM_OVERTEMP)
+    {
+        printf("CTL error: over-temperature alarm active\r\n");
+        return;
+    }
+    const aout_state_t *a = aout_state();
+    int32_t current = (a->mode == AOUT_DC) ? (int32_t)a->mv : THERMO_OUT_MIN_MV;
+    int was_on = g_thermo.on;
+    if (thermo_start(&g_thermo, sp, current) != 0)
+    {
+        printf("CTL error: setpoint out of range 0.0..100.0 degC\r\n");
+        return;
+    }
+    g_ctl_trip = "none";
+    if (!was_on)
+    {
+        (void)aout_dc((uint32_t)g_thermo.out_mv);
+        g_thermo_next_ms = HAL_GetTick();
+    }
+    print_ctl();
+}
+
+/* ---------------------------------------------------------------- alarms */
+
+static void alarm_out_init(void)
+{
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    ALARM_PORT->BSRR = (uint32_t)ALARM_PIN << 16U; /* low before it becomes an output */
+    GPIO_InitTypeDef g = {0};
+    g.Pin = ALARM_PIN;
+    g.Mode = GPIO_MODE_OUTPUT_PP;
+    g.Pull = GPIO_NOPULL;
+    g.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(ALARM_PORT, &g);
+}
+
+static void alarm_tick(uint32_t now_ms)
+{
+    /* Evaluate once per new env reading (or status change), so the debounce counts
+     * readings; without a sensor, on a timer of the same period. */
+    const env_state_t *e = env_state();
+    if (e->seq != g_alarm_env_seq)
+    {
+        g_alarm_env_seq = e->seq;
+        g_alarm_next_ms = now_ms + ENV_PERIOD_MS;
+    }
+    else if (e->status != ENV_OK && (int32_t)(now_ms - g_alarm_next_ms) >= 0)
+    {
+        g_alarm_next_ms = now_ms + ENV_PERIOD_MS;
+    }
+    else
+    {
+        return;
+    }
+
+    alarm_in_t in = {
+        .env_ok = (e->status == ENV_OK && e->reads > 0U) ? 1U : 0U,
+        .env_lost = (e->status == ENV_LOST) ? 1U : 0U,
+        .env_dc = e->temp_dc,
+        .regulating = g_thermo.on,
+        .pv_mv = ain_state()->mv,
+    };
+    uint8_t changed = alarm_eval(&g_alarm, &in);
+    if (!changed)
+    {
+        return;
+    }
+
+    /* Outputs first, reporting after: the pin and the trip must not wait on the UART. */
+    ALARM_PORT->BSRR = g_alarm.active ? ALARM_PIN : ((uint32_t)ALARM_PIN << 16U);
+    uint8_t trip = g_alarm.active & (ALARM_OVERTEMP | ALARM_PV_FAULT);
+    if (g_thermo.on && trip)
+    {
+        thermo_stop(&g_thermo);
+        aout_off(); /* heater off */
+        g_ctl_trip = alarm_name((trip & ALARM_OVERTEMP) ? ALARM_OVERTEMP : ALARM_PV_FAULT);
+    }
+    if (g_can.init_ok)
+    {
+        int16_t t = (int16_t)e->temp_dc;
+        can_frame_t f = {.id = ALARM_CAN_ID, .dlc = 4U,
+                         .data = {g_alarm.active, changed, (uint8_t)t, (uint8_t)((uint16_t)t >> 8)}};
+        (void)can_send(&f);
+    }
+    for (uint32_t i = 0; i < ALARM_COUNT; i++)
+    {
+        uint8_t bit = (uint8_t)(1U << i);
+        if (changed & bit)
+        {
+            printf("\r\nEVT alarm %s=%s active=0x%02X\r\n", (g_alarm.active & bit) ? "set" : "clear",
+                   alarm_name(bit), g_alarm.active);
+        }
+    }
+    if (strcmp(g_ctl_trip, "none") != 0 && !g_thermo.on && (changed & trip))
+    {
+        printf("EVT ctl trip=%s heater=off\r\n", g_ctl_trip);
+    }
+}
+
+static void print_alarm(void)
+{
+    const env_state_t *e = env_state();
+    static const char *const env_names[] = {"absent", "ok", "lost"};
+    printf("ALARM active=0x%02X overtemp=%u pv_fault=%u env_lost=%u", g_alarm.active,
+           (g_alarm.active & ALARM_OVERTEMP) ? 1U : 0U, (g_alarm.active & ALARM_PV_FAULT) ? 1U : 0U,
+           (g_alarm.active & ALARM_ENV_LOST) ? 1U : 0U);
+    print_dc("limit_c", g_alarm.limit_dc);
+    printf(" env=%s", env_names[e->status]);
+    print_dc("env_c", e->temp_dc);
+    printf(" press_pa=%lu events=%lu\r\n", (unsigned long)e->press_pa,
+           (unsigned long)g_alarm.events);
+}
+
+static void handle_alarm(char *args)
+{
+    char *a0 = strtok(args, " ");
+    if (a0 == NULL)
+    {
+        print_alarm();
+        return;
+    }
+    int32_t lim;
+    if (strcmp(a0, "limit") != 0 || parse_dc(strtok(NULL, " "), &lim) != 0 ||
+        lim < ALARM_LIMIT_MIN_DC || lim > ALARM_LIMIT_MAX_DC)
+    {
+        printf("ALARM error: usage alarm [limit <degC -40..85, one decimal>]\r\n");
+        return;
+    }
+    g_alarm.limit_dc = lim;
+    print_alarm();
+}
+
+/* ---------------------------------------------------------------- strobe */
+
+static void strobe_init(void)
+{
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    STROBE_PORT->BSRR = (uint32_t)STROBE_PIN << 16U;
+    GPIO_InitTypeDef g = {0};
+    g.Pin = STROBE_PIN;
+    g.Mode = GPIO_MODE_OUTPUT_PP;
+    g.Pull = GPIO_NOPULL;
+    g.Speed = GPIO_SPEED_FREQ_MEDIUM;
+    HAL_GPIO_Init(STROBE_PORT, &g);
+}
+
+static void handle_strobe(char *args)
+{
+    char *a0 = strtok(args, " ");
+    if (a0 != NULL)
+    {
+        uint32_t i;
+        for (i = 0; i < sizeof(STROBE_NAMES) / sizeof(STROBE_NAMES[0]); i++)
+        {
+            if (strcmp(a0, STROBE_NAMES[i]) == 0)
+            {
+                break;
+            }
+        }
+        if (i == sizeof(STROBE_NAMES) / sizeof(STROBE_NAMES[0]))
+        {
+            printf("STROBE error: usage strobe [off|ain|ctl|env]\r\n");
+            return;
+        }
+        g_strobe = (strobe_mode_t)i;
+        STROBE_PORT->BSRR = (uint32_t)STROBE_PIN << 16U;
+    }
+    printf("STROBE mode=%s\r\n", STROBE_NAMES[g_strobe]);
+}
+
+/* ---------------------------------------------------------------- lifecycle */
+
+/* Why we booted, read once from RCC_CSR before anything else, then cleared so
+ * the next reset reports only its own cause. A power-on also sets the pin and
+ * brown-out flags, and a software reset also sets the pin flag, hence the order. */
+static void reset_cause_capture(void)
+{
+    uint32_t csr = RCC->CSR;
+    if (csr & RCC_CSR_IWDGRSTF)
+    {
+        g_reset_cause = "iwdg";
+    }
+    else if (csr & RCC_CSR_WWDGRSTF)
+    {
+        g_reset_cause = "wwdg";
+    }
+    else if (csr & RCC_CSR_LPWRRSTF)
+    {
+        g_reset_cause = "lowpower";
+    }
+    else if (csr & RCC_CSR_SFTRSTF)
+    {
+        g_reset_cause = "software";
+    }
+    else if (csr & RCC_CSR_PORRSTF)
+    {
+        g_reset_cause = "power-on";
+    }
+    else if (csr & RCC_CSR_BORRSTF)
+    {
+        g_reset_cause = "brownout";
+    }
+    else if (csr & RCC_CSR_PINRSTF)
+    {
+        g_reset_cause = "pin";
+    }
+    RCC->CSR |= RCC_CSR_RMVF;
+}
+
+static void iwdg_start(void)
+{
+    IWDG->KR = 0xCCCCU; /* start (LSI comes up on its own) */
+    IWDG->KR = 0x5555U; /* unlock PR/RLR */
+    IWDG->PR = IWDG_PR_PR_2; /* /64 */
+    IWDG->RLR = IWDG_RELOAD;
+    while (IWDG->SR != 0U)
+    {
+    }
+    IWDG->KR = 0xAAAAU;
+}
+
+static void iwdg_kick(void)
+{
+    IWDG->KR = 0xAAAAU;
+}
+
+static void print_info(void)
+{
+    printf("INFO fw=%s version=%s build=\"%s %s\" uptime_ms=%lu boot_ms=%lu reset=%s\r\n",
+           FW_NAME, FW_VERSION, __DATE__, __TIME__, (unsigned long)HAL_GetTick(),
+           (unsigned long)g_boot_ms, g_reset_cause);
 }
 
 void USART1_IRQHandler(void)
