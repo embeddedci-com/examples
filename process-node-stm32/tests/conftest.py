@@ -33,6 +33,10 @@ def wiring(pins):
         uart_rx=pins.pin_3,   # pod samples the DUT's TX here
         uart_tx=pins.pin_4,   # pod drives the DUT's RX here
         efuse=pins.efuse,
+        # Analog in: pod 3.3 V DAC SMA -> 10 kOhm -> PA1 (Nucleo A1). PROCESS_NODE_ANALOG=0 on a
+        # bench without that lead skips the analog tests instead of failing them.
+        ain_path="3v3",
+        analog=os.environ.get("PROCESS_NODE_ANALOG", "1") == "1",
     )
 
 
@@ -58,7 +62,7 @@ def _flash(bp, wiring, firmware):
 
 
 class Node:
-    """The Nucleo CAN node, driven through its UART console."""
+    """The Nucleo process node, driven through its UART console."""
 
     def __init__(self, uart):
         self.uart = uart
@@ -73,6 +77,11 @@ class Node:
         """``info`` as a dict: fw, version, build, uptime_ms, reset."""
         m = self.cmd("info", r"INFO ([^\r\n]*)\r\n")
         return {k: v.strip('"') for k, v in re.findall(r'(\w+)=("[^"]*"|\S+)', m.group(1))}
+
+    def ain(self):
+        """One fresh analog-input reading: mv, raw, filt_mv, vdda_mv, samples (all ints)."""
+        m = self.cmd("ain", r"AIN ([^\r\n]*)\r\n")
+        return {k: int(v) for k, v in (kv.split("=", 1) for kv in m.group(1).split())}
 
     def status(self):
         m = self.cmd("can status", r"CAN status: ([^\r\n]*)\r\n")

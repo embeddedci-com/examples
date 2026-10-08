@@ -29,6 +29,10 @@ practice; `can selftest` checks it. If it is ever flaky, put a TXS0108E in betwe
   termination, so the termination test can prove the switch: on, traffic flows; off, the
   unterminated bus carries nothing. With the jumper fitted, set `CAN_NODE_TERM=1`.
 - The Nucleo's ST-LINK holds the F446 in reset for about 2.2 s after power-up.
+- Analog in: pod **3.3 V DAC SMA -> 10 kOhm -> PA1** (Nucleo A1). The resistor limits the
+  current into the F446 when its rail is off and the pod still drives. Use the 3.3 V SMA
+  only: the 5 V and +-12 V SMAs would damage the pin. On a bench without this lead set
+  `PROCESS_NODE_ANALOG=0` to skip the analog tests.
 - Console: USART1 PA9 (TX) to pod LA3, PA10 (RX) to pod LA4, 115200 8N1.
   SWD: SWCLK LA11, SWDIO LA12.
 
@@ -47,6 +51,7 @@ With 8 MHz the fastest bitrate is 500 kbit/s; 1 Mbit/s needs a 16 MHz crystal.
 | Command | Does |
 |---|---|
 | `info` | `INFO fw=process-node version=... uptime_ms=... reset=power-on\|software\|iwdg\|pin\|brownout` |
+| `ain` | `AIN mv=... raw=... filt_mv=... vdda_mv=... samples=...`: analog input PA1 |
 | `wdt stall` | stop kicking the watchdog (~2 s timeout) so the IWDG resets the node |
 | `can status` | mode, bitrate, TEC/REC, error flags, counters |
 | `can init [bitrate]` | reset and configure the MCP2515 (default 500000) |
@@ -75,6 +80,10 @@ Without `--benchpod-firmware` the tests use the firmware already on the board. S
 
 `tests/test_lifecycle.py`: firmware identity, uptime, and the reset cause after a power
 cycle, a software reset and a watchdog reset.
+
+`tests/test_analog_in.py`: the pod's 3.3 V DAC is the sensor; the node's reading over a
+0.1-3.0 V sweep (per point, gain, offset), VDDA from VREFINT, the filtered process value
+after a step, and the 100 Hz background sampler.
 
 `tests/test_can_hil.py`: both directions with standard and extended ids and 0 to 8 bytes, request/response
 (echo), periodic timing from the pod's timestamps, bursts within and beyond the pod's RX

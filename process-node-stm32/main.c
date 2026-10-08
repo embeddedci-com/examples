@@ -12,10 +12,13 @@
  * The module's TJA1050 needs 5 V, which makes its SPI outputs 5 V too; PA6 and
  * PC7 are 5 V tolerant. A TXS0108E in between is optional (see README).
  *
+ * Analog in: PA1 (ADC1_IN1, Nucleo A1) <- pod 3.3 V DAC SMA via 10 kOhm.
+ *
  * Console: USART1 PA9 (TX) / PA10 (RX), 115200 8N1. Type "help".
  */
 
 #include "stm32f4xx_hal.h"
+#include "analog.h"
 #include "mcp2515.h"
 #include "mcp2515_timing.h"
 #include <stdint.h>
@@ -146,6 +149,7 @@ int main(void)
     print_info();
     printf("PROCESS-NODE: uart=USART1(115200), spi=SPI1 PA5/PA6/PA7, cs=PB6, int=PC7\r\n");
     can_init(g_can.bitrate);
+    ain_init();
     printf("APP_OK\r\n");
     printf("type a command and press Enter (e.g. help)\r\n");
     print_prompt();
@@ -167,6 +171,8 @@ int main(void)
             cmd_index = 0;
             print_prompt();
         }
+
+        ain_tick(HAL_GetTick());
 
         if (g_can.init_ok)
         {
@@ -679,6 +685,13 @@ static void process_command(char *cmd)
     {
         print_info();
     }
+    else if (strcmp(cmd, "ain") == 0)
+    {
+        const ain_state_t *a = ain_read_now();
+        printf("AIN mv=%lu raw=%lu filt_mv=%lu vdda_mv=%lu samples=%lu\r\n", (unsigned long)a->mv,
+               (unsigned long)a->raw, (unsigned long)a->filt_mv, (unsigned long)a->vdda_mv,
+               (unsigned long)a->samples);
+    }
     else if (strcmp(cmd, "wdt stall") == 0)
     {
         /* Lifecycle test hook: stop kicking the watchdog; it resets us in ~2 s and
@@ -710,6 +723,7 @@ static void print_help(void)
 {
     printf("commands:\r\n");
     printf("  info                      firmware, version, uptime, reset cause\r\n");
+    printf("  ain                       analog input PA1: mV, raw, filtered, VDDA\r\n");
     printf("  status | can status       counters, mode, error state\r\n");
     printf("  can init [bitrate]        reset + configure the MCP2515 (default 500000)\r\n");
     printf("  can osc <MHz>             module crystal (8 or 16), then re-init\r\n");

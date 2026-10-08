@@ -46,7 +46,7 @@ LDFLAGS := \
 	-specs=nano.specs \
 	-specs=nosys.specs
 
-APP_SRCS := main.c mcp2515.c syscalls.c sysmem.c system_stm32f4xx.c
+APP_SRCS := main.c analog.c mcp2515.c syscalls.c sysmem.c system_stm32f4xx.c
 
 HAL_SRCS := \
 	stm32f4xx_hal.c \
@@ -68,7 +68,7 @@ all: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).bin $(BUILD_DIR)/$(TARGET
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/%.o: %.c mcp2515.h mcp2515_timing.h | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: %.c mcp2515.h mcp2515_timing.h analog.h proc.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/%.o: $(HAL_DIR)/Src/%.c | $(BUILD_DIR)
@@ -93,10 +93,12 @@ clean:
 flash: $(BUILD_DIR)/$(TARGET).elf
 	st-flash write $(BUILD_DIR)/$(TARGET).bin 0x08000000
 
-# Host unit test for the MCP2515 bit-timing solver (no MCU/HAL).
+# Host unit tests: MCP2515 bit-timing solver and the process logic (no MCU/HAL).
 HOSTCC ?= cc
 test-host: | $(BUILD_DIR)
 	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -I. tests/test_mcp2515_timing.c -o $(BUILD_DIR)/test_mcp2515_timing
 	$(BUILD_DIR)/test_mcp2515_timing
+	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -I. tests/test_proc.c -o $(BUILD_DIR)/test_proc
+	$(BUILD_DIR)/test_proc
 
 .PHONY: all clean flash test-host
