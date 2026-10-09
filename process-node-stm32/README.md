@@ -67,6 +67,7 @@ With 8 MHz the fastest bitrate is 500 kbit/s; 1 Mbit/s needs a 16 MHz crystal.
 | `ctl [on <degC> \| off]` | thermostat: PA1 sensor (0.5 V + 20 mV/degC) -> PI at 50 Hz -> PA4 heater; `CTL mode=... sp_c=... pv_c=... out_mv=... in_band_ms=...` |
 | `alarm [limit <degC>]` | `ALARM active=0x.. overtemp= pv_fault= env_lost= limit_c= env=ok\|absent\|lost env_c= press_pa= events=` |
 | `strobe [off\|ain\|ctl\|env]` | PA8 marks a task for the logic analyzer: high during an ADC sample / env read, toggles per control step |
+| `i2c <addr> [w <b..>] [d <ms>] [r <n>]` | raw transfer on the sensor bus (hex addr and bytes): write, wait, read; `I2C ok r=...` or `I2C err` |
 | `wdt stall` | stop kicking the watchdog (~2 s timeout) so the IWDG resets the node |
 | `can status` | mode, bitrate, TEC/REC, error flags, counters |
 | `can init [bitrate]` | reset and configure the MCP2515 (default 500000) |
@@ -116,6 +117,13 @@ integer damping.
 over-temperature on PB0 + UART + CAN with hysteresis, a spike the debounce ignores, the
 heater trip and no restart while hot, a shorted process sensor while regulating, and the
 sensor going missing and coming back.
+
+`tests/test_sensor_models.py`: the pod's other emulated sensors, read by the node over its
+sensor bus with the `i2c` command and decoded with each vendor's reference math: a BME280
+(temperature, pressure, humidity; the node's `ctrl_hum` survives a new reading), an SHT4x
+(three precisions, serial number, CRCs) and an MPU-6050 (asleep at power-up, the range the
+node selects, an upside-down reading, `DEVICE_RESET` clearing itself). Needs pod firmware
+with the `sensor_types` capability and SDK support for it.
 
 `tests/test_timing.py`: the pod's logic analyzer times the node on PA8/PB0: 100 Hz ADC
 sampling (rate, jitter, ~1 ms cost per reading), the 50 Hz control rate while regulating,

@@ -137,6 +137,7 @@ static int usart1_read_byte_nonblocking(uint8_t *byte);
 static void uart_process_rx_byte(uint8_t byte);
 static void print_prompt(void);
 static void process_command(char *cmd);
+static void handle_i2c(char *args);
 static void print_help(void);
 static void can_init(uint32_t bitrate);
 static void can_service(void);
@@ -791,6 +792,10 @@ static void process_command(char *cmd)
     {
         handle_can(cmd + 4);
     }
+    else if (strncmp(cmd, "i2c ", 4) == 0)
+    {
+        handle_i2c(cmd + 4);
+    }
     else if (strcmp(cmd, "reset") == 0 || strcmp(cmd, "reboot") == 0)
     {
         printf("RESET: rebooting via NVIC_SystemReset()\r\n");
@@ -805,6 +810,66 @@ static void process_command(char *cmd)
     }
 }
 
+/* i2c <addr> [w <b0> <b1> ...] [d <ms>] [r <n>]: a raw transfer on the env sensor's bus, so a
+ * test can read any emulated part the way its driver does. Bytes and addr are hex.
+ *   i2c 44 w fd d 10 r 6      SHT4x: measure, wait, read T/RH with CRCs
+ *   i2c 68 w 6b 00            MPU-6050: wake up
+ *   i2c 68 w 3b r 14          MPU-6050: accel, temperature, gyro
+ * Replies "I2C ok r=<hex bytes>" or "I2C err" (NACK or timeout). */
+static void handle_i2c(char *args)
+{
+    uint8_t w[32];
+    uint8_t r[32];
+    uint16_t nw = 0U;
+    uint16_t nr = 0U;
+    uint32_t delay_ms = 0U;
+    char *tok = strtok(args, " ");
+    if (tok == NULL)
+    {
+        printf("I2C err usage: i2c <addr> [w <b..>] [d <ms>] [r <n>]\r\n");
+        return;
+    }
+    uint32_t addr = strtoul(tok, NULL, 16);
+    char mode = 0;
+    while ((tok = strtok(NULL, " ")) != NULL)
+    {
+        if (strcmp(tok, "w") == 0 || strcmp(tok, "d") == 0 || strcmp(tok, "r") == 0)
+        {
+            mode = tok[0];
+            continue;
+        }
+        if (mode == 'w' && nw < sizeof(w))
+        {
+            w[nw++] = (uint8_t)strtoul(tok, NULL, 16);
+        }
+        else if (mode == 'd')
+        {
+            delay_ms = strtoul(tok, NULL, 10);
+        }
+        else if (mode == 'r')
+        {
+            unsigned long n = strtoul(tok, NULL, 10);
+            nr = (uint16_t)(n > sizeof(r) ? sizeof(r) : n);
+        }
+    }
+    if (addr > 0x7FU || (nw == 0U && nr == 0U))
+    {
+        printf("I2C err usage: i2c <addr> [w <b..>] [d <ms>] [r <n>]\r\n");
+        return;
+    }
+    if (env_i2c_raw((uint8_t)addr, w, nw, r, nr, delay_ms) != 0)
+    {
+        printf("I2C err\r\n");
+        return;
+    }
+    printf("I2C ok r=");
+    for (uint16_t i = 0U; i < nr; i++)
+    {
+        printf("%s%02x", i ? " " : "", r[i]);
+    }
+    printf("\r\n");
+}
+
 static void print_help(void)
 {
     printf("commands:\r\n");
@@ -814,6 +879,7 @@ static void print_help(void)
     printf("  ctl [on <degC> | off]     thermostat: PA1 sensor (0.5 V + 20 mV/degC) -> PI -> PA4\r\n");
     printf("  alarm [limit <degC>]      alarms, env sensor (BMP280), over-temperature limit\r\n");
     printf("  strobe [off|ain|ctl|env]  PA8 marks that task: high while ain/env runs, toggles per ctl step\r\n");
+    printf("  i2c <addr> [w <b..>] [d <ms>] [r <n>]   raw transfer on the env bus (hex bytes)\r\n");
     printf("  status | can status       counters, mode, error state\r\n");
     printf("  can init [bitrate]        reset + configure the MCP2515 (default 500000)\r\n");
     printf("  can osc <MHz>             module crystal (8 or 16), then re-init\r\n");
