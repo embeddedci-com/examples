@@ -28,7 +28,8 @@ permissions:
 jobs:
   # --- Always: build the firmware and publish it to embeddedci (no hardware) ---
   build:
-    runs-on: ubuntu-latest
+    # Pinned to ubuntu-24.04: ubuntu-latest moves to Ubuntu 26 from 2026-10-19. Unpin once 26.04 is verified.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
@@ -73,7 +74,7 @@ jobs:
   # --- Manual only: rebuild, then flash + drive the DUT on the physical bench ---
   hil:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
