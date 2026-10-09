@@ -1,11 +1,8 @@
-"""Cloud hardware-in-the-loop self-test for the device registered as ``benchpod-v1.0.0``.
+"""Hardware-in-the-loop self-test: flash ``build/selftest.elf`` and check that it boots.
 
-Runs in GitHub Actions (see ``.github/workflows/selftest-cloud.yml``): the workflow builds
-``selftest.c`` into ``build/selftest.elf``, then pytest drives the device **through
-embeddedci.com** — there is no BenchPod on the runner. The connection
-``embeddedci:benchpod-v1.0.0`` authenticates with the workflow's GitHub OIDC token, the
-server bridges a tunnel to the physical BenchPod, and we flash + UART-verify the firmware
-over the cloud exactly as we would locally.
+Pass ``--benchpod-connection`` a LAN address or ``embeddedci:<device-name>`` (through
+embeddedci.com, authenticated with an API key or a ``benchpod login`` session); the test
+flashes and UART-verifies the firmware the same way over either (see the README).
 
 Wiring (BenchPod logic-analyzer channels → DUT). The pod has no dedicated SWD/UART
 pins — it exposes 12 generic LA channels (``pins.pin_1`` .. ``pins.pin_12``) and any
@@ -109,7 +106,7 @@ def dut(benchpod, wiring):
 
 @pytest.mark.hardware
 def test_selftest_boots_over_cloud(dut, wiring, firmware, build_report):
-    """Flash selftest.elf to benchpod-v1.0.0 over the cloud and assert it boots cleanly.
+    """Flash selftest.elf to the pod's DUT and assert it boots cleanly.
 
     The ``build_report`` fixture is the opt-in that records this run as a GitHub-sourced build on
     embeddedci.com (uploading the firmware and capturing pass/fail) — but only inside GitHub Actions
