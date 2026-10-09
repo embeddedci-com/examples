@@ -185,3 +185,24 @@ const env_state_t *env_state(void)
 {
     return &g_env;
 }
+
+int env_i2c_raw(uint8_t addr, const uint8_t *w, uint16_t nw, uint8_t *r, uint16_t nr,
+                uint32_t delay_ms)
+{
+    if (nw > 0U &&
+        HAL_I2C_Master_Transmit(&g_i2c, (uint16_t)(addr << 1), (uint8_t *)w, nw, I2C_TIMEOUT_MS) != HAL_OK)
+    {
+        bus_recover();
+        return -1;
+    }
+    if (delay_ms > 0U)
+    {
+        HAL_Delay(delay_ms);
+    }
+    if (nr > 0U && HAL_I2C_Master_Receive(&g_i2c, (uint16_t)(addr << 1), r, nr, I2C_TIMEOUT_MS) != HAL_OK)
+    {
+        bus_recover();
+        return -1;
+    }
+    return 0;
+}

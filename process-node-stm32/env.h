@@ -36,4 +36,10 @@ int env_due(uint32_t now_ms);
 void env_tick(uint32_t now_ms);
 const env_state_t *env_state(void);
 
+/* A raw transfer on the sensor bus (the `i2c` console command): write nw bytes to the 7-bit
+ * addr (none when nw is 0), wait delay_ms, then read nr bytes (none when nr is 0), each its
+ * own START..STOP. 0 ok, -1 the device NACKed or timed out. */
+int env_i2c_raw(uint8_t addr, const uint8_t *w, uint16_t nw, uint8_t *r, uint16_t nr,
+                uint32_t delay_ms);
+
 #endif
