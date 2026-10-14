@@ -13,6 +13,8 @@ import time
 
 import pytest
 
+from conftest import require_analog
+
 # Stay under the 3.3 V rail: the top of the F446 ADC is VDDA itself.
 SWEEP_V = [0.10, 0.50, 1.00, 1.65, 2.20, 2.80, 3.00]
 # Per point: pod DAC calibration (a few mV) + F446 ADC (+-2 LSB after averaging) + VREFINT_CAL
@@ -26,8 +28,7 @@ FILTER_SETTLE_S = 3.0  # ~0.32 s time constant: 1 % after ~1.5 s
 @pytest.fixture
 def source(benchpod, wiring, node):
     """Set the 'sensor' voltage on PA1 through the pod's 3.3 V DAC; returns the volts achieved."""
-    if not wiring.analog:
-        pytest.skip("PROCESS_NODE_ANALOG=0: no pod DAC -> PA1 lead on this bench")
+    require_analog(benchpod, wiring, "no pod DAC -> PA1 lead on this bench")
 
     def drive(volts):
         return benchpod.dac_output(wiring.ain_path, volts=volts).voltage

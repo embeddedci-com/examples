@@ -104,6 +104,15 @@ def wiring(pins):
     )
 
 
+def require_analog(benchpod, wiring, missing_lead):
+    """Skip a test that needs the pod's DAC/ADC: on the digital-only BenchPod (no analog front end)
+    and on a bench without the analog leads (PROCESS_NODE_ANALOG=0, ``missing_lead`` says which)."""
+    if not benchpod.can_analog:
+        pytest.skip("digital-only BenchPod: no DAC or ADC to drive PA1 / measure PA4")
+    if not wiring.analog:
+        pytest.skip(f"PROCESS_NODE_ANALOG=0: {missing_lead}")
+
+
 def _flash(bp, wiring, firmware):
     result = None
     for attempt in range(FLASH_ATTEMPTS):
@@ -254,8 +263,7 @@ def plant(benchpod, wiring, node):
     test_thermostat.py). Calibrates the pod's 3.3 V output against the node's ADC, then returns a
     callable: ``plant(ambient_c)`` (re)loads the plant curve; ``plant.short_sensor()`` replaces the
     process with a sensor shorted to ground (0 V on PA1). Everything is stopped afterwards."""
-    if not wiring.analog:
-        pytest.skip("PROCESS_NODE_ANALOG=0: the thermostat needs both analog leads")
+    require_analog(benchpod, wiring, "the thermostat needs both analog leads")
     caps = benchpod.capabilities
     if not (caps.dac_control_loop and caps.dac_loop_input_map):
         pytest.skip("pod gateware has no control loop with an input map")

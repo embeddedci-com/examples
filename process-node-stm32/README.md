@@ -32,7 +32,10 @@ practice; `can selftest` checks it. If it is ever flaky, put a TXS0108E in betwe
 - Analog in: pod **3.3 V DAC SMA -> 5-10 kOhm -> PA1** (Nucleo A1). The resistor limits the
   current into the F446 when its rail is off and the pod still drives. Use the 3.3 V SMA
   only: the 5 V and +-12 V SMAs would damage the pin. On a bench without this lead set
-  `PROCESS_NODE_ANALOG=0` to skip the analog tests.
+  `PROCESS_NODE_ANALOG=0` to skip the analog tests. On a digital-only BenchPod (no DAC or ADC)
+  the analog in/out, thermostat and the alarm, power and timing tests that use the emulated
+  thermal plant skip on their own; CAN, the environment sensor, lifecycle, update and the rest
+  still run.
 - Analog out: **PA4 (Nucleo A2) -> pod ADC SMA**. The node keeps PA4 off (high-Z) unless a
   test turns it on, because the pod's own analog tests expect that SMA quiet.
 - Environment sensor: BMP280 on I2C1, **PB8 (SCL) -> LA1, PB9 (SDA) -> LA2**; on the bench the
