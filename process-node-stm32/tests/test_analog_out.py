@@ -13,6 +13,8 @@ import time
 
 import pytest
 
+from conftest import require_analog
+
 DC_MV = [300, 1000, 1650, 2500, 3000]
 # F446 DAC (+-~10 mV offset, buffered) + pod front-SMA path (/12 divider, calibrated) + noise.
 DC_TOL_MV = 50
@@ -28,8 +30,7 @@ OFFSET_TOL_MV = 60
 @pytest.fixture
 def actuator(benchpod, wiring, node):
     """The node's analog output, measured on the pod's ADC SMA; switched off afterwards."""
-    if not wiring.analog:
-        pytest.skip("PROCESS_NODE_ANALOG=0: no PA4 -> pod ADC lead on this bench")
+    require_analog(benchpod, wiring, "no PA4 -> pod ADC lead on this bench")
     node.aout("off")
     try:
         yield node
