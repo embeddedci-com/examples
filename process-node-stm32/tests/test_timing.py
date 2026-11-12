@@ -1,7 +1,9 @@
 """Timing HIL tests: the node's real-time behaviour, measured on its pins by the pod's logic analyzer.
 
 PA8 (on LA6) marks a task the node selects with ``strobe``: high while an ADC sample or an env read
-runs, toggled on every control step. From that the pod measures what a datasheet would promise:
+runs, toggled on every control step. PA8 drives LA6 only while a strobe mode is on (it is an input
+otherwise, since the pod may drive the same wire as a sensor's data-ready line through 1 kOhm); the
+pod's capture input is high impedance, so the resistor does not change these timings. From that the pod measures what a datasheet would promise:
 the sampling and control rates, their jitter, the time a sample costs, and how fast the alarm output
 (PB0 on LA5) follows the reading that confirms an alarm.
 """
@@ -95,7 +97,7 @@ def test_alarm_follows_its_reading(benchpod, wiring, node, env, strobe):
         # 2.6 s at 40 us resolution: arming + ARM_WAIT_S + up to ~0.6 s to the alarm fit easily.
         job = pool.submit(benchpod.capture_la, 65536, sample_rate_hz=25_000)
         time.sleep(ARM_WAIT_S)
-        env.set_i2c_sensor(temperature_c=60.0)
+        env.set(temperature_c=60.0)
         cap = job.result(timeout=30)
     rise = cap.first_edge(wiring.alarm, "rising")
     assert rise is not None, "PB0 did not rise within the capture (started too late or too short)"
