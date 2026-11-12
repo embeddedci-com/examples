@@ -157,6 +157,20 @@ int main(void)
     expect_eq("calib t2", parsed.t2, 26435);
     expect_eq("calib t3", parsed.t3, -1000);
 
+    /* BME280 humidity: the trim bytes the sensor library's bme280 definition serves (H1 75,
+     * H2 362, H3 0, H4 322, H5 50, H6 30, with H4/H5 packed in 0xE4..0xE6), and the datasheet's
+     * integer compensation at the t_fine above. */
+    const uint8_t e1[7] = {0x6A, 0x01, 0x00, 0x14, 0x22, 0x03, 0x1E};
+    bme280_hcalib_t hc;
+    bme280_hcalib_parse(75U, e1, &hc);
+    expect_eq("hcalib h2", hc.h2, 362);
+    expect_eq("hcalib h4", hc.h4, 322);
+    expect_eq("hcalib h5", hc.h5, 50);
+    expect_eq("hcalib h6", hc.h6, 30);
+    expect_eq("bme280 hum", (long)bme280_hum_q10(&hc, 30000, 128422), 53035);
+    expect_eq("bme280 hum clamps high", (long)bme280_hum_q10(&hc, 40000, 128422), 102400);
+    expect_eq("bme280 hum clamps low", (long)bme280_hum_q10(&hc, 20000, 128422), 0);
+
     /* Alarms: debounce, hysteresis, hold while the sensor is gone, pv only while regulating. */
     alarm_t al;
     alarm_init(&al);
