@@ -34,6 +34,13 @@ from conftest import BITRATE, OSC_MHZ
 # The module's own 120R jumper fitted? Off on this bench, so the pod's switch is the only termination.
 MODULE_TERM = os.environ.get("CAN_NODE_TERM", "0") == "1"
 POD_RX_RING = 31  # frames the pod buffers between reads (32-slot ring, one kept empty)
+# Firmware with CAN FD (capability can_fd) has a 1 KB byte ring instead: a record is 12 bytes plus
+# the data rounded up to 4, so it holds 63 of the bursts' 2-byte frames (51 with 8 bytes).
+POD_RX_RING_FD = 63
+
+
+def pod_rx_ring(benchpod) -> int:
+    return POD_RX_RING_FD if benchpod.supports("can_fd") else POD_RX_RING
 
 
 @pytest.fixture
@@ -118,7 +125,8 @@ def test_burst_fits_pod_ring(can, node):
 @pytest.mark.hardware
 def test_burst_overflow_is_counted(benchpod, can, node):
     """A burst bigger than the pod's RX ring: every frame is either delivered or counted as dropped."""
-    n = 60
+    ring = pod_rx_ring(benchpod)
+    n = 150  # well above either ring, so some frames must drop before the first read
     node.cmd(f"can burst {n} 401", r"CAN burst done sent=%d failed=0" % n)
     got, dropped = 0, 0
     deadline = time.monotonic() + 3.0
@@ -128,8 +136,31 @@ def test_burst_overflow_is_counted(benchpod, can, node):
         dropped = r.overflow  # cumulative since can_config (the fixture just configured)
         if not r.frames and got + dropped >= n:
             break
-    assert dropped > 0, f"expected overflow with {n} frames > ring {POD_RX_RING}; got {got}"
+    assert dropped > 0, f"expected overflow with {n} frames > ring {ring}; got {got}"
     assert got + dropped == n, f"delivered {got} + dropped {dropped} != sent {n}"
+
+
+@pytest.mark.hardware
+@pytest.mark.parametrize("data_bitrate", [2_000_000, 5_000_000])
+def test_classic_node_on_fd_bus(benchpod, node, data_bitrate):
+    """The pod runs CAN FD (firmware 3.10.2+) next to the classic node: classic frames (fd=False)
+    go both ways at the shared nominal rate, with no error frames. An FD frame would be
+    error-framed by the classic MCP2515, so none is sent here."""
+    if not benchpod.supports("can_fd"):
+        pytest.skip("CAN FD needs firmware 3.10.2+ (capability can_fd)")
+    node.init(BITRATE)
+    with benchpod.open_can(bitrate=BITRATE, data_bitrate=data_bitrate, mode="normal", term=True) as bus:
+        reply = bus.write(0x123, b"\x01\x02\x03", fd=False)
+        assert reply["fd"] is False
+        node.expect_rx(0x123, b"\x01\x02\x03", ext=False)
+        bus.write(0x1ABCDE0, bytes(range(8)), ext=True, fd=False)
+        node.expect_rx(0x1ABCDE0, bytes(range(8)), ext=True)
+        node.cmd("can send 321 11 22 33", r"CAN tx ok")
+        f = bus.expect(can_id=0x321, timeout=2.0)
+        assert not f.fd and f.data == b"\x11\x22\x33"
+        st = bus.status()
+        assert st["tec"] == 0 and st["rec"] == 0 and not st["bus_off"], f"pod saw errors: {st}"
+        assert int(node.status()["tec"]) == 0 and int(node.status()["rec"]) == 0
 
 
 @pytest.mark.hardware
