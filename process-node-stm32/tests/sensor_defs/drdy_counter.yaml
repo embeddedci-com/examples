@@ -1,0 +1,30 @@
+format: 1
+kind: i2c
+name: drdy_counter
+label: "Test part: a sampled sensor with a data-ready output"
+description: |
+  RATE (0x10, 0..3) picks 0, 10, 50 or 100 samples per second. Each sample raises the data-ready
+  pin: a 50 us pulse here; tests switch the definition to level mode, where reading DATA (0x20)
+  releases it. DATA is the reading the test sets. Test-only.
+version: 1.0.0
+license: Apache-2.0
+
+params:
+  - { key: reading, min: -32768, max: 32767, default: 1000 }
+
+i2c:
+  address: 0x3C
+
+registers:
+  - { at: 0x0F, u8: 0xD7, name: WHO_AM_I, writable: false }
+  - { at: 0x10, u8: 0x00, name: RATE }
+  - { at: 0x20, s16be: reading, name: DATA }
+
+data_ready:
+  active: high
+  mode: pulse
+  pulse_us: 50
+  on: rate
+  rate_hz: "[1, 10, 50, 100][reg[0x10] & 3]"
+  enabled: "(reg[0x10] & 3) != 0"
+  clear_on_read: 0x20
