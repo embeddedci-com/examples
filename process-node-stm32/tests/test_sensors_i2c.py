@@ -240,5 +240,5 @@ def test_absent_address_nacks(node, sensors):
     """Nothing at 0x2A: the address byte is refused (and reported as such, not as a timeout)."""
     data, err = node.i2c_try("rd 2a 00 1")
     assert data is None and err == "nack_addr phase=w", err
-    m = node.cmd("i2c probe 2a", r"I2C probe addr=2a (\w+)")
+    m = node.cmd("i2c probe 2a", r"I2C probe addr=2a (\w+)\r\n")
     assert m.group(1) == "nack_addr"

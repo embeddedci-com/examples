@@ -64,8 +64,8 @@ def test_level_mode_cleared_on_read(node, wiring, sensors):
 def test_drdy_refused_while_strobe_drives_pa8(node, sensors):
     """While a strobe mode drives PA8 the node will not read it as an input. Nothing drives LA6
     from the pod here, so this runs without the resistor."""
-    node.cmd("strobe ain", r"STROBE mode=ain")
+    node.cmd("strobe ain", r"STROBE mode=ain\b[^\r\n]*\r\n")
     m = node.cmd("drdy", r"DRDY ([^\r\n]*)\r\n")
     assert m.group(1).startswith("err strobe is on"), m.group(1)
-    node.cmd("strobe off", r"STROBE mode=off")
+    node.cmd("strobe off", r"STROBE mode=off\b[^\r\n]*\r\n")
     assert node.drdy()["result"] == "level"

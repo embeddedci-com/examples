@@ -531,11 +531,11 @@ def sensors(benchpod, wiring, node):
             with contextlib.suppress(Exception):
                 stop()
         benchpod.disable_pullup(wiring.i2c_scl, wiring.i2c_sda)
-        node.cmd("uart3 close", r"UART3 closed")
-        node.cmd("uart3 nmea off", r"NMEA mode=off")
+        node.cmd("uart3 close", r"UART3 closed\b[^\r\n]*\r\n")
+        node.cmd("uart3 nmea off", r"NMEA mode=off\b[^\r\n]*\r\n")
         node.i2c_cfg("hz 100000 timeout 25")
         node.spi_cfg(0, 500_000)
-        node.cmd("strobe off", r"STROBE mode=off")
+        node.cmd("strobe off", r"STROBE mode=off\b[^\r\n]*\r\n")
         node.env("on")
 
 

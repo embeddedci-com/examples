@@ -66,7 +66,7 @@ def test_bus_stuck_recovers(node, wiring, sensors):
     assert data is None and err.split()[0] in ("bus_busy", "timeout", "arb_lost", "bus_error"), \
         (data, err)
     time.sleep(0.8)
-    m = node.cmd("i2c recover", r"I2C recover sda_before=(\d) (ok|stuck)")
+    m = node.cmd("i2c recover", r"I2C recover sda_before=(\d) (ok|stuck)\r\n")
     assert m.group(2) == "ok", m.group(0)
     wait_for(lambda: node.i2c_try("rd 76 d0 1")[0], lambda d: d == b"\x60", timeout=2.0,
              what="the bus to work again")
