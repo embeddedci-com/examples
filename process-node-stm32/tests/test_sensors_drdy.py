@@ -5,6 +5,8 @@ rate, each sample raises the line, in pulse mode for 50 us, in level mode until 
 (0x20). Tests where the pod drives LA6 need the resistor (BENCH_LA6_RESISTOR=1).
 """
 
+import time
+
 import pytest
 
 from conftest import i2c_pins, local_def
@@ -48,16 +50,19 @@ def test_pulse_mode(node, wiring, sensors):
 
 @pytest.mark.needs_la6_resistor
 def test_level_mode_cleared_on_read(node, wiring, sensors):
+    """Level mode: the line goes active with a sample, a read of DATA (clear_on_read) releases it,
+    the next sample asserts it again; with the definition's `enabled` false it stays released."""
     start(sensors, wiring, "level")
     node.i2c_wr(ADDR, 0x10, [0x01])               # 10 samples per second
     w = node.drdy("wait high 500")
     assert w["result"] == "ok" and w["level"] == 1, w
-    node.i2c_wr(ADDR, 0x10, [0x00])               # stop sampling: the level must hold by itself
-    assert node.drdy()["level"] == 1, "level mode: high until the data is read"
-    assert node.drdy("count 300")["falls"] == 0
-
     assert node.i2c_rd(ADDR, 0x20, 2) == (-1234).to_bytes(2, "big", signed=True)
     assert node.drdy()["level"] == 0, "reading DATA (clear_on_read) released the line"
+    w = node.drdy("wait high 500")
+    assert w["result"] == "ok", f"the next sample asserts it again: {w}"
+    node.i2c_wr(ADDR, 0x10, [0x00])               # sampling off: `enabled` is false
+    time.sleep(0.05)
+    assert node.drdy()["level"] == 0, "with enabled false the line is released"
     assert node.drdy("count 300")["rises"] == 0
 
 

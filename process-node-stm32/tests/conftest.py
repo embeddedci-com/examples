@@ -347,8 +347,9 @@ class Node:
         return {k: (v if k == "mode" else int(v)) for k, v in (kv.split("=", 1) for kv in m.group(1).split())}
 
     def nmea_lines(self, seconds):
-        """Every ``NMEA ok|bad <sentence>`` line the node prints within ``seconds``:
-        a list of (ok, sentence)."""
+        """Every ``NMEA ok|bad <sentence>`` line the node prints within the next ``seconds`` (lines
+        already waiting in the serial buffer are dropped): a list of (ok, sentence)."""
+        self.uart.read()                          # drop the backlog: lines printed before now
         deadline = time.monotonic() + seconds
         text = ""
         while time.monotonic() < deadline:
