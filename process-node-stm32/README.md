@@ -106,6 +106,7 @@ With 8 MHz the fastest bitrate is 500 kbit/s; 1 Mbit/s needs a 16 MHz crystal.
 | `i2c scan` / `i2c probe <addr>` | `I2C scan found=44 68 76`; `I2C probe addr=44 ack\|nack_addr` |
 | `i2c cfg [hz <n>] [timeout <ms>]` | bus clock 10-400 kHz (default 100 kHz) and the per-step timeout 1-500 ms (default 25, bounds clock stretching) |
 | `i2c recover` | up to 9 SCL pulses by hand and a STOP, then a peripheral reset; `I2C recover sda_before=0\|1 ok\|stuck` |
+| `i2c target <addr>` / `i2c target off` / `i2c target mem <reg> <n>` | answer at `addr` as a 256-byte register file (the first written byte sets the pointer), so the pod's I2C master has a target; the env driver goes off. `I2C target on=1 addr=.. ptr=.. matches=.. rx=.. tx=.. errors=..`; `mem` returns what the master wrote |
 | | every `i2c` error is `I2C err nack_addr phase=w\|r`, `I2C err nack_data byte=<n>` (0 = first data byte), or `I2C err bus_busy\|timeout\|arb_lost\|bus_error phase=w\|r` |
 | `env [on\|off]` | `ENV driver=on status=ok\|absent\|lost chip=bmp280\|bme280 addr=76 temp_c= press_pa= hum_pct= reads= fails=`; `off` stops the driver, `on` starts over (probe, soft reset, setup) |
 | `spi x <bytes..> [z <n>]` | one SPI2 transfer with CS low: the bytes, then n zero bytes; `SPI ok n=<n> r=<every byte clocked in>` |
@@ -167,6 +168,13 @@ integer damping.
 over-temperature on PB0 + UART + CAN with hysteresis, a spike the debounce ignores, the
 heater trip and no restart while hot, a shorted process sensor while regulating, and the
 sensor going missing and coming back.
+
+`tests/test_bus_master.py`: the pod as a bus master (gateware v55+; skips on older pods). Its
+I2C master on LA1/LA2 writes and reads the node's `i2c target` at 100 kHz, 400 kHz and 1 MHz,
+long transfers, a NACK, a scan, and the pull-up check. A capture with a `send` gets the
+transaction and its decode, and SCL never runs faster than asked. SPI modes 0-3 run on
+LA1/LA2/LA5/LA6, and a gpio send drives LA6 (both need `BENCH_LA6_RESISTOR=1`). `la_dir`
+refuses a push-pull output on the node's alarm output.
 
 Emulated sensors (`tests/test_sensors_*.py`): the pod plays sensor definitions, the sensor
 library's (BME280, BMP280, SHT4x, MPU-6050, GPS) and small test-only ones in `tests/sensor_defs/`,

@@ -2,6 +2,7 @@
 #include "dwt.h"
 #include "env.h"
 #include "i2cbus.h"
+#include "i2ctarget.h"
 #include "spi2.h"
 #include "stm32f4xx_hal.h"
 #include "uart3.h"
@@ -148,7 +149,7 @@ static void i2c_reply(i2cb_result_t res, const uint8_t *r, uint16_t nr)
 #define I2C_USAGE                                                                                  \
     "I2C err usage: i2c <addr> [w <b..>] [d <ms>] [r <n>] | i2c rd <addr> <reg> <n> | "            \
     "i2c wr <addr> <reg> <b..> | i2c scan | i2c probe <addr> | i2c cfg [hz <n>] [timeout <ms>] | " \
-    "i2c recover\r\n"
+    "i2c recover | i2c target [<addr> | off | mem <reg> <n>]\r\n"
 
 /* The register address: two hex digits are an 8-bit address, three or four a 16-bit one
  * (sent high byte first). */
@@ -168,6 +169,62 @@ static int parse_reg(const char *tok, uint8_t *w, uint16_t *nw)
     return 0;
 }
 
+static void print_target(void)
+{
+    const i2ct_state_t *t = i2ct_state();
+    printf("I2C target on=%u addr=%02x ptr=%02x matches=%lu rx=%lu tx=%lu errors=%lu\r\n", t->on,
+           t->addr, t->ptr, (unsigned long)t->matches, (unsigned long)t->rx, (unsigned long)t->tx,
+           (unsigned long)t->errors);
+}
+
+/* i2c target <addr>: answer at addr as a 256-byte register file (the env driver goes off);
+ * i2c target off; i2c target mem <reg> <n>: what the master wrote; i2c target: counters. */
+static void handle_i2c_target(void)
+{
+    char *a0 = strtok(NULL, " ");
+    uint32_t v;
+    uint32_t n;
+    if (a0 == NULL)
+    {
+        print_target();
+    }
+    else if (strcmp(a0, "off") == 0)
+    {
+        if (i2ct_active())
+        {
+            i2ct_stop();
+        }
+        print_target();
+    }
+    else if (strcmp(a0, "mem") == 0)
+    {
+        if (parse_hex_u32(strtok(NULL, " "), &v, 0xFFU) != 0 || parse_dec(strtok(NULL, " "), &n, I2CB_MAX_BYTES) != 0 ||
+            n < 1U)
+        {
+            printf("I2C err usage: i2c target mem <reg> <1..%u>\r\n", I2CB_MAX_BYTES);
+            return;
+        }
+        printf("I2C target mem=");
+        uint8_t buf[I2CB_MAX_BYTES];
+        for (uint32_t i = 0; i < n; i++)
+        {
+            buf[i] = i2ct_mem()[(v + i) & 0xFFU];
+        }
+        print_bytes(buf, (uint16_t)n);
+        printf("\r\n");
+    }
+    else if (parse_hex_u32(a0, &v, 0x7FU) == 0 && v >= 0x08U && v <= 0x77U)
+    {
+        env_set_enabled(0);
+        (void)i2ct_start((uint8_t)v);
+        print_target();
+    }
+    else
+    {
+        printf("I2C err usage: i2c target [<addr 08..77> | off | mem <reg> <n>]\r\n");
+    }
+}
+
 static void handle_i2c(char *args)
 {
     static uint8_t w[I2CB_MAX_BYTES + 2U];
@@ -179,6 +236,16 @@ static void handle_i2c(char *args)
     if (tok == NULL)
     {
         printf(I2C_USAGE);
+        return;
+    }
+    if (strcmp(tok, "target") == 0)
+    {
+        handle_i2c_target();
+        return;
+    }
+    if (i2ct_active())
+    {
+        printf("I2C err target mode is on; i2c target off first\r\n");
         return;
     }
     if (strcmp(tok, "scan") == 0)
@@ -850,6 +917,11 @@ static void handle_env(char *args)
     static const char *const status_names[] = {"absent", "ok", "lost"};
     static const char *const chip_names[] = {"none", "bmp280", "bme280"};
     char *v = strtok(args, " ");
+    if (v != NULL && strcmp(v, "on") == 0 && i2ct_active())
+    {
+        printf("ENV err the I2C target mode is on; i2c target off first\r\n");
+        return;
+    }
     if (v != NULL && strcmp(v, "on") == 0)
     {
         env_set_enabled(1);

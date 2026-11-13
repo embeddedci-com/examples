@@ -1,4 +1,5 @@
 #include "env.h"
+#include "i2ctarget.h"
 #include "bmp280_comp.h"
 #include "stm32f4xx_hal.h"
 
@@ -200,7 +201,7 @@ void env_init(void)
 
 int env_due(uint32_t now_ms)
 {
-    return g_enabled && (int32_t)(now_ms - g_next_ms) >= 0;
+    return g_enabled && !i2ct_active() && (int32_t)(now_ms - g_next_ms) >= 0;
 }
 
 void env_set_enabled(int on)
