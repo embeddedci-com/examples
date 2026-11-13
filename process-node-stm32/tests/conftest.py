@@ -7,7 +7,7 @@ analog and lifecycle files share one boot.
 Emulated-sensor tests (test_sensors_*.py) are marked per group (``sensors_i2c``, ``sensors_spi``,
 ``sensors_uart``, ``sensors_drdy``, ``sensors_stimulus``, ``sensors_faults``), so ``-m sensors_spi``
 runs one group. Wires that are not on every bench yet gate their tests with an environment
-variable: BENCH_NEW_WIRING=1 (SPI2 on LA7-LA10, USART3 on LA13/LA14) and BENCH_LA6_RESISTOR=1 (the
+variable: BENCH_NEW_WIRING=1 (SPI2 on LA9/LA10/LA13/LA14, USART3 on LA7/LA8) and BENCH_LA6_RESISTOR=1 (the
 1 kOhm between PA8 and LA6 that lets the pod drive a data-ready line into PA8).
 """
 
@@ -52,12 +52,12 @@ K = 150
 SENSOR_MARKERS = {
     "hardware": "needs the bench (pod + node)",
     "sensors_i2c": "emulated I2C sensors on LA1/LA2, read by the node over I2C1",
-    "sensors_spi": "the emulated SPI sensor on LA7-LA10 (BENCH_NEW_WIRING=1)",
-    "sensors_uart": "emulated UART sensors on LA13/LA14 (BENCH_NEW_WIRING=1)",
+    "sensors_spi": "the emulated SPI sensor on LA9/LA10/LA13/LA14 (BENCH_NEW_WIRING=1)",
+    "sensors_uart": "emulated UART sensors on LA7/LA8 (BENCH_NEW_WIRING=1)",
     "sensors_drdy": "a data-ready line the pod drives on LA6 into PA8 (BENCH_LA6_RESISTOR=1)",
     "sensors_stimulus": "values over time from a stimulus",
     "sensors_faults": "injected sensor faults",
-    "needs_new_wiring": "skips unless BENCH_NEW_WIRING=1 (SPI2 on LA7-LA10, USART3 on LA13/LA14)",
+    "needs_new_wiring": "skips unless BENCH_NEW_WIRING=1 (SPI2 on LA9/LA10/LA13/LA14, USART3 on LA7/LA8)",
     "needs_la6_resistor": "skips unless BENCH_LA6_RESISTOR=1 (1 kOhm between PA8 and LA6)",
 }
 
@@ -74,7 +74,7 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if item.get_closest_marker("needs_new_wiring") and not new_wiring:
             item.add_marker(pytest.mark.skip(
-                reason="the SPI2 (LA7-LA10) and USART3 (LA13/LA14) wires are not in place: wire "
+                reason="the SPI2 (LA9, LA10, LA13, LA14) and USART3 (LA7/LA8) wires are not in place: wire "
                        "them as in the README, then set BENCH_NEW_WIRING=1"))
         if item.get_closest_marker("needs_la6_resistor") and not la6:
             item.add_marker(pytest.mark.skip(
@@ -142,13 +142,13 @@ def wiring(pins):
         # (PA8 is an input while the strobe is off). Only the data-ready tests drive it.
         drdy=pins.pin_6,
         # SPI2 to the emulated SPI sensor; the pod drives only MISO (and only while CS is low).
-        spi_sclk=pins.pin_7,  # PB13 SCK, DUT drives
-        spi_mosi=pins.pin_8,  # PB15 MOSI, DUT drives
-        spi_miso=pins.pin_9,  # PB14 MISO, pod drives
-        spi_cs=pins.pin_10,   # PB12 CS, DUT drives (software CS)
+        spi_sclk=pins.pin_9,   # PB13 SCK, DUT drives
+        spi_mosi=pins.pin_10,  # PB15 MOSI, DUT drives
+        spi_miso=pins.pin_13,  # PB14 MISO, pod drives
+        spi_cs=pins.pin_14,    # PB12 CS, DUT drives (software CS)
         # USART3 to the emulated UART sensor.
-        sensor_uart_tx=pins.pin_13,  # pod -> PC11 USART3 RX
-        sensor_uart_rx=pins.pin_14,  # PC10 USART3 TX -> pod
+        sensor_uart_tx=pins.pin_8,   # pod -> PC11 USART3 RX
+        sensor_uart_rx=pins.pin_7,   # PC10 USART3 TX -> pod
         # Analog in: pod 3.3 V DAC SMA -> 5-10 kOhm -> PA1 (Nucleo A1). PROCESS_NODE_ANALOG=0 on a
         # bench without that lead skips the analog tests instead of failing them.
         ain_path="3v3",

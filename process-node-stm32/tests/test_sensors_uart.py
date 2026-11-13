@@ -1,4 +1,4 @@
-"""Emulated UART sensors on LA13 (pod to PC11, USART3 RX) and LA14 (PC10, USART3 TX, to the pod).
+"""Emulated UART sensors on LA8 (pod to PC11, USART3 RX) and LA7 (PC10, USART3 TX, to the pod).
 
 The GPS receiver is the sensor library's ``gps_nmea``: the node prints every NMEA sentence it
 receives with its checksum verdict (``uart3 nmea on``), and the tests parse the position, check

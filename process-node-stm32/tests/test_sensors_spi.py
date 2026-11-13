@@ -1,4 +1,4 @@
-"""The emulated SPI sensor on LA7-LA10, read by the node over SPI2 (PB13 SCK, PB15 MOSI,
+"""The emulated SPI sensor on LA9 (SCK), LA10 (MOSI), LA13 (MISO) and LA14 (CS), read by the node over SPI2 (PB13 SCK, PB15 MOSI,
 PB14 MISO, PB12 CS).
 
 The part is sensor_defs/spi_accel.yaml, a LIS3DH-like accelerometer: bit 7 of the first byte

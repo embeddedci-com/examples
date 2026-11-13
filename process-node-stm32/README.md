@@ -54,10 +54,10 @@ practice; `can selftest` checks it. If it is ever flaky, put a TXS0108E in betwe
   data-ready line, read with `drdy`); the resistor limits the current should both ever drive.
 - Console: USART1 PA9 (TX) to pod LA3, PA10 (RX) to pod LA4, 115200 8N1.
   SWD: SWCLK LA11, SWDIO LA12.
-- SPI sensor (emulated by the pod) on SPI2, CS in software: **PB13 SCK -> LA7, PB15 MOSI -> LA8,
-  LA9 -> PB14 MISO, PB12 CS -> LA10**. The node drives SCK, MOSI and CS; the pod drives MISO only
+- SPI sensor (emulated by the pod) on SPI2, CS in software: **PB13 SCK -> LA9, PB15 MOSI -> LA10,
+  LA13 -> PB14 MISO, PB12 CS -> LA14**. The node drives SCK, MOSI and CS; the pod drives MISO only
   while CS is low (PB14 has a pull-up, so a released MISO reads 0xFF). SPI1 stays the MCP2515's.
-- UART sensor (emulated by the pod) on USART3: **LA13 -> PC11 (RX), PC10 (TX) -> LA14**. Closed
+- UART sensor (emulated by the pod) on USART3: **LA8 -> PC11 (RX), PC10 (TX) -> LA7**. Closed
   (both pins inputs) until `uart3 open`.
 
 All LA wiring at a glance (the `wiring` fixture in `tests/conftest.py` is the same table):
@@ -70,14 +70,14 @@ All LA wiring at a glance (the `wiring` fixture in `tests/conftest.py` is the sa
 | LA4 | PA10 | USART1 RX, console | pod |
 | LA5 | PB0 | alarm | node |
 | LA6 | PA8 via 1 kOhm | strobe / data ready | node (strobe on) or pod (data-ready tests) |
-| LA7 | PB13 | SPI2 SCK | node |
-| LA8 | PB15 | SPI2 MOSI | node |
-| LA9 | PB14 | SPI2 MISO | pod |
-| LA10 | PB12 | SPI2 CS | node |
+| LA7 | PC10 | USART3 TX | node |
+| LA8 | PC11 | USART3 RX | pod |
+| LA9 | PB13 | SPI2 SCK | node |
+| LA10 | PB15 | SPI2 MOSI | node |
 | LA11 | SWCLK | SWD | pod |
 | LA12 | SWDIO | SWD | both |
-| LA13 | PC11 | USART3 RX | pod |
-| LA14 | PC10 | USART3 TX | node |
+| LA13 | PB14 | SPI2 MISO | pod |
+| LA14 | PB12 | SPI2 CS | node |
 
 ## Build
 
@@ -178,7 +178,7 @@ SDK with `bp.sensors`. Run one group with `-m`:
 | Marker | File | Checks |
 |---|---|---|
 | `sensors_i2c` | `test_sensors_i2c.py` | BME280 and BMP280 through the env driver (values, humidity, the alternate address, the soft-reset rule, read-only chip id), SHT4x raw commands (three precisions, serial, CRCs, NACK while measuring, heater commands answered after the pod's 65.535 ms limit), instance names of at most 16 characters, MPU-6050 (sleep, range, upside down, DEVICE_RESET), four sensors at different addresses on one bus, a 16-bit register address part, FIFO reads and overflow, clock stretching (and a timeout shorter than it), NACK while busy, an absent address |
-| `sensors_spi` | `test_sensors_spi.py` | a LIS3DH-like part on LA7-LA10: read and increment bits, WHO_AM_I, data registers that follow ODR and full scale, writes stored, read-only WHO_AM_I, the FIFO and its overrun, no data-ready pin (refused), SPI modes 0-3, 125 kHz to 1 MHz |
+| `sensors_spi` | `test_sensors_spi.py` | a LIS3DH-like part on LA9, LA10, LA13 and LA14: read and increment bits, WHO_AM_I, data registers that follow ODR and full scale, writes stored, read-only WHO_AM_I, the FIFO and its overrun, no data-ready pin (refused), SPI modes 0-3, 125 kHz to 1 MHz |
 | `sensors_uart` | `test_sensors_uart.py` | the GPS: every sentence type with a good checksum, the position, the position moving with speed and course, no fix, the sentence mask; an MH-Z19-like part: byte request with checksum, a wrong request ignored, a text request |
 | `sensors_drdy` | `test_sensors_drdy.py` | data ready on LA6 into PA8: pulse mode (rate, width, off), level mode held until DATA is read, `drdy` refused while the strobe drives PA8 |
 | `sensors_stimulus` | `test_sensors_stimulus.py` | a temperature ramp the env driver follows over 6 s, a no_response window from a stimulus file |
@@ -186,7 +186,7 @@ SDK with `bp.sensors`. Run one group with `-m`:
 
 Two environment variables gate tests on wires that are not on every bench yet:
 
-- `BENCH_NEW_WIRING=1`: the SPI2 (LA7-LA10) and USART3 (LA13/LA14) wires are in place; without
+- `BENCH_NEW_WIRING=1`: the SPI2 (LA9, LA10, LA13, LA14) and USART3 (LA7/LA8) wires are in place; without
   it the SPI and UART sensor tests skip.
 - `BENCH_LA6_RESISTOR=1`: the 1 kOhm resistor is in the PA8-LA6 wire; without it every test
   where the pod drives LA6 (data ready) skips. Install the resistor first: without it the pod and
