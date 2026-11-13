@@ -82,6 +82,12 @@ def test_fifo(node, accel):
     wr(node, 0x24, [0x00])
 
 
+def test_no_data_ready_pin(wiring, sensors):
+    """The emulated SPI target has no data-ready pin: a start that asks for one is refused."""
+    with pytest.raises(Exception, match="no data-ready pin"):
+        sensors.start(local_def("spi_accel"), pins=spi_pins(wiring, drdy=wiring.drdy))
+
+
 @pytest.mark.parametrize("mode", [0, 1, 2, 3])
 def test_spi_modes(node, wiring, sensors, mode):
     """The part in each SPI mode, the node in the same one."""

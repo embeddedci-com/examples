@@ -110,6 +110,30 @@ def test_sht4x_nacks_while_measuring(node, wiring, sensors):
     assert crc8_sensirion(r[0:2]) == r[2], r.hex()
 
 
+def test_sht4x_heater_commands_answer_after_65_ms(node, wiring, sensors):
+    """The heater commands (0x39 ... 0x15) take 0.11 s or 1.1 s on the real part. The pod's I2C
+    target holds conversion and command times of at most 65.535 ms, so it answers them after
+    that: NACK while busy, the measurement once the cut time has passed."""
+    sensors.start("sht4x", pins=i2c_pins(wiring), values={"temperature_c": 31.0, "humidity_pct": 40.0})
+    for cmd in ("39", "32", "15"):                # 200 mW 1 s, 200 mW 0.1 s, 20 mW 0.1 s
+        data, err = node.i2c_try(f"44 w {cmd} d 30 r 6")
+        assert data is None and err.startswith("nack_addr"), (cmd, data, err)
+        time.sleep(0.05)                          # 80 ms after the command in all
+        t, rh = _sht4x_answer(node.i2c("44 r 6"))
+        assert abs(t - 31.0) < 0.01 and abs(rh - 40.0) < 0.01, (cmd, t, rh)
+
+
+def _sht4x_answer(r):
+    assert crc8_sensirion(r[0:2]) == r[2] and crc8_sensirion(r[3:5]) == r[5], f"CRC: {r.hex()}"
+    return -45 + 175 * (r[0] << 8 | r[1]) / 65535, -6 + 125 * (r[3] << 8 | r[4]) / 65535
+
+
+def test_instance_names_are_16_characters_at_most(sensors, wiring):
+    """The pod takes instance names of 1 to 16 characters; the SDK refuses a longer one."""
+    with pytest.raises(ValueError, match="1 to 16 characters"):
+        sensors.start("sht4x", instance="sht4x_on_the_bench", pins=i2c_pins(wiring))
+
+
 # ---- MPU-6050 (register map rev 4.2) ----
 
 
@@ -203,7 +227,7 @@ def test_fifo_reads(node, wiring, sensors):
     assert node.i2c_rd(0x1D, 0x11, 1)[0] < level + 5, "popped frames leave the FIFO"
 
     time.sleep(0.5)                               # 50 more frames into a 32-frame FIFO
-    assert node.i2c_rd(0x1D, 0x11, 1)[0] == 32, "full, drop_oldest keeps it at its depth"
+    assert node.i2c_rd(0x1D, 0x11, 1)[0] == 32, "full: new frames are dropped, the level stays at its depth"
     node.i2c_wr(0x1D, 0x10, [0x00])
 
 

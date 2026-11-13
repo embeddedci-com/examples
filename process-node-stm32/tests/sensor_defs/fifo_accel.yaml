@@ -33,4 +33,4 @@ fifo:
     - "byte(sat_s16(accel_z_g * 1000), 0)"
   rate_hz: 100
   enabled: "reg[0x10] & 1"
-  overflow: drop_oldest
+  overflow: drop_newest     # the pod's gateware drops new frames when full (drop_oldest acts the same)
