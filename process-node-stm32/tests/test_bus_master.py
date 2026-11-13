@@ -192,7 +192,8 @@ def test_send_and_capture_i2c(i2c_bus, benchpod, node, hz, rate, want):
 
 def test_send_refused_without_session(benchpod, wiring, node):
     require_master(benchpod)
-    with pytest.raises(Exception, match=r"i2c_start"):
+    # the firmware says i2c_start; the SDK (2.13.13+) rewrites the hint to bp.open_i2c()
+    with pytest.raises(Exception, match=r"no I2C session"):
         capture_with_send(benchpod, {"bus": "i2c", "addr": TARGET, "read": 1}, samples=1024,
                           rate_hz=12e6, trigger_la=la(wiring.i2c_sda))
 
