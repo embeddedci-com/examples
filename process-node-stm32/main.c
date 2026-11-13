@@ -828,6 +828,7 @@ static void print_help(void)
     printf("  i2c <addr> [w <b..>] [d <ms>] [r <n>]   raw transfer on I2C1, each phase START..STOP\r\n");
     printf("  i2c rd <addr> <reg> <n> | i2c wr <addr> <reg> <b..>   registers (reg: 2 hex digits 8-bit, 4 16-bit)\r\n");
     printf("  i2c scan | i2c probe <addr> | i2c cfg [hz <n>] [timeout <ms>] | i2c recover\r\n");
+    printf("  i2c target [<addr> | off | mem <reg> <n>]   answer as a 256-byte register file (env goes off)\r\n");
     printf("  env [on|off]              BMP280/BME280 driver: state, readings; off frees the bus\r\n");
     printf("  spi x <bytes..> [z <n>]   SPI2 transfer with CS (PB12) low; spi cfg [mode <0-3>] [hz <n>]\r\n");
     printf("  uart3 open <baud> | close | send <hex..> | line <text> | flush | count <ms> | stat\r\n");
