@@ -1,0 +1,53 @@
+format: 1
+kind: spi
+name: spi_accel
+label: "Test part: a LIS3DH-like SPI accelerometer"
+description: |
+  First byte: bit 7 = read, bit 6 = auto increment, bits 5..0 the register. WHO_AM_I 0x33,
+  CTRL_REG1 (0x20) ODR in bits 7..4 (0 = power down: the outputs read 0), CTRL_REG4 (0x23)
+  full scale in bits 5..4, OUT_X_L..OUT_Z_H (0x28..0x2D) s16le. Unlike the LIS3DH, the FIFO
+  has its own data register: FIFO_EN (bit 6 of CTRL_REG5, 0x24) collects 6-byte X/Y/Z frames at
+  the ODR, FIFO_SRC (0x2F) counts them (bit 6 overrun), FIFO_DATA (0x3E) pops them. Test-only.
+version: 1.0.0
+license: Apache-2.0
+
+params:
+  - { key: accel_x_g, unit: g, min: -16, max: 16, default: 0 }
+  - { key: accel_y_g, unit: g, min: -16, max: 16, default: 0 }
+  - { key: accel_z_g, unit: g, min: -16, max: 16, default: 1 }
+
+spi:
+  mode: 0
+  read_bit: { bit: 7, value: 1 }
+  increment_bit: { bit: 6, value: 1 }
+  address_mask: 0x3F
+
+let:
+  - odr: "bits(reg[0x20], 7, 4)"
+  - lsb: "[16384, 8192, 4096, 1365][bits(reg[0x23], 5, 4)]"     # LSB per g at +-2/4/8/16 g
+  - on: "odr != 0 ? 1 : 0"
+
+registers:
+  - { at: 0x0F, u8: 0x33, name: WHO_AM_I, writable: false }
+  - { at: 0x20, u8: 0x07, name: CTRL_REG1 }
+  - { at: 0x23, u8: 0x00, name: CTRL_REG4 }
+  - { at: 0x24, u8: 0x00, name: CTRL_REG5 }
+  - { at: 0x27, u8: "on ? 0x0F : 0x00", name: STATUS_REG }
+  - { at: 0x28, s16le: "on * accel_x_g * lsb", name: OUT_X }
+  - { at: 0x2A, s16le: "on * accel_y_g * lsb", name: OUT_Y }
+  - { at: 0x2C, s16le: "on * accel_z_g * lsb", name: OUT_Z }
+  - { at: 0x2F, u8: "min(fifo_level, 31) | (fifo_level >= 32 ? 0x40 : 0)", name: FIFO_SRC }
+
+fifo:
+  at: 0x3E
+  depth: 32
+  frame:
+    - "byte(sat_s16(accel_x_g * lsb), 0)"
+    - "byte(sat_s16(accel_x_g * lsb), 1)"
+    - "byte(sat_s16(accel_y_g * lsb), 0)"
+    - "byte(sat_s16(accel_y_g * lsb), 1)"
+    - "byte(sat_s16(accel_z_g * lsb), 0)"
+    - "byte(sat_s16(accel_z_g * lsb), 1)"
+  rate_hz: "[1, 1, 10, 25, 50, 100, 200, 400, 1, 1, 1, 1, 1, 1, 1, 1][odr]"
+  enabled: "bit(reg[0x24], 6) && odr != 0"
+  overflow: drop_newest

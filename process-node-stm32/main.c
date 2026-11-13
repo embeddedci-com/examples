@@ -19,7 +19,11 @@
  *             lines and CAN frame 0x0A0 on every change.
  * Strobe:     PA8 (Nucleo D7), high while the selected task runs (ADC sample or
  *             env read), or toggled per control step (too short for a pulse),
- *             so a logic analyzer can time it.
+ *             so a logic analyzer can time it. PA8 is an input (pull-down) while the
+ *             strobe is off: it shares LA6, through 1 kOhm, with an emulated sensor's
+ *             data-ready line (the drdy command).
+ * Sensor buses for emulated sensors (bench_cmds.c): I2C1 above (i2c), SPI2 PB13 SCK /
+ *             PB15 MOSI / PB14 MISO / PB12 CS (spi), USART3 PC10 TX / PC11 RX (uart3).
  *
  * Console: USART1 PA9 (TX) / PA10 (RX), 115200 8N1. Type "help".
  */
@@ -27,6 +31,7 @@
 #include "stm32f4xx_hal.h"
 #include "alarm.h"
 #include "analog.h"
+#include "bench_cmds.h"
 #include "env.h"
 #include "mcp2515.h"
 #include "mcp2515_timing.h"
@@ -37,9 +42,9 @@
 #include <string.h>
 
 #define FW_NAME "process-node"
-#define FW_VERSION "0.2.0"
+#define FW_VERSION "0.3.0"
 
-#define CMD_BUF_SIZE 96
+#define CMD_BUF_SIZE 200
 
 /* Independent watchdog: LSI ~32 kHz / 64 = 500 Hz, reload 1000 -> ~2 s. The main
  * loop kicks it every pass; long blocking work (CAN bursts) kicks it as it goes. */
@@ -137,7 +142,6 @@ static int usart1_read_byte_nonblocking(uint8_t *byte);
 static void uart_process_rx_byte(uint8_t byte);
 static void print_prompt(void);
 static void process_command(char *cmd);
-static void handle_i2c(char *args);
 static void print_help(void);
 static void can_init(uint32_t bitrate);
 static void can_service(void);
@@ -198,6 +202,7 @@ int main(void)
     alarm_init(&g_alarm);
     alarm_out_init();
     strobe_init();
+    bench_init();
     g_boot_ms = HAL_GetTick();
     printf("APP_OK\r\n");
     printf("type a command and press Enter (e.g. help)\r\n");
@@ -244,6 +249,7 @@ int main(void)
             STROBE_PORT->BSRR = (uint32_t)STROBE_PIN << 16U;
         }
         alarm_tick(now); /* right after the read, so an alarm follows its reading at once */
+        bench_service();
 
         if (g_can.init_ok)
         {
@@ -792,9 +798,8 @@ static void process_command(char *cmd)
     {
         handle_can(cmd + 4);
     }
-    else if (strncmp(cmd, "i2c ", 4) == 0)
+    else if (bench_command(cmd))
     {
-        handle_i2c(cmd + 4);
     }
     else if (strcmp(cmd, "reset") == 0 || strcmp(cmd, "reboot") == 0)
     {
@@ -810,66 +815,6 @@ static void process_command(char *cmd)
     }
 }
 
-/* i2c <addr> [w <b0> <b1> ...] [d <ms>] [r <n>]: a raw transfer on the env sensor's bus, so a
- * test can read any emulated part the way its driver does. Bytes and addr are hex.
- *   i2c 44 w fd d 10 r 6      SHT4x: measure, wait, read T/RH with CRCs
- *   i2c 68 w 6b 00            MPU-6050: wake up
- *   i2c 68 w 3b r 14          MPU-6050: accel, temperature, gyro
- * Replies "I2C ok r=<hex bytes>" or "I2C err" (NACK or timeout). */
-static void handle_i2c(char *args)
-{
-    uint8_t w[32];
-    uint8_t r[32];
-    uint16_t nw = 0U;
-    uint16_t nr = 0U;
-    uint32_t delay_ms = 0U;
-    char *tok = strtok(args, " ");
-    if (tok == NULL)
-    {
-        printf("I2C err usage: i2c <addr> [w <b..>] [d <ms>] [r <n>]\r\n");
-        return;
-    }
-    uint32_t addr = strtoul(tok, NULL, 16);
-    char mode = 0;
-    while ((tok = strtok(NULL, " ")) != NULL)
-    {
-        if (strcmp(tok, "w") == 0 || strcmp(tok, "d") == 0 || strcmp(tok, "r") == 0)
-        {
-            mode = tok[0];
-            continue;
-        }
-        if (mode == 'w' && nw < sizeof(w))
-        {
-            w[nw++] = (uint8_t)strtoul(tok, NULL, 16);
-        }
-        else if (mode == 'd')
-        {
-            delay_ms = strtoul(tok, NULL, 10);
-        }
-        else if (mode == 'r')
-        {
-            unsigned long n = strtoul(tok, NULL, 10);
-            nr = (uint16_t)(n > sizeof(r) ? sizeof(r) : n);
-        }
-    }
-    if (addr > 0x7FU || (nw == 0U && nr == 0U))
-    {
-        printf("I2C err usage: i2c <addr> [w <b..>] [d <ms>] [r <n>]\r\n");
-        return;
-    }
-    if (env_i2c_raw((uint8_t)addr, w, nw, r, nr, delay_ms) != 0)
-    {
-        printf("I2C err\r\n");
-        return;
-    }
-    printf("I2C ok r=");
-    for (uint16_t i = 0U; i < nr; i++)
-    {
-        printf("%s%02x", i ? " " : "", r[i]);
-    }
-    printf("\r\n");
-}
-
 static void print_help(void)
 {
     printf("commands:\r\n");
@@ -878,8 +823,17 @@ static void print_help(void)
     printf("  aout [<mV> | sine <Hz> <amp-mV> <offset-mV> | off]   analog output PA4\r\n");
     printf("  ctl [on <degC> | off]     thermostat: PA1 sensor (0.5 V + 20 mV/degC) -> PI -> PA4\r\n");
     printf("  alarm [limit <degC>]      alarms, env sensor (BMP280), over-temperature limit\r\n");
-    printf("  strobe [off|ain|ctl|env]  PA8 marks that task: high while ain/env runs, toggles per ctl step\r\n");
-    printf("  i2c <addr> [w <b..>] [d <ms>] [r <n>]   raw transfer on the env bus (hex bytes)\r\n");
+    printf("  strobe [off|ain|ctl|env]  PA8 marks that task: high while ain/env runs, toggles per ctl step;\r\n");
+    printf("                            off makes PA8 an input again\r\n");
+    printf("  i2c <addr> [w <b..>] [d <ms>] [r <n>]   raw transfer on I2C1, each phase START..STOP\r\n");
+    printf("  i2c rd <addr> <reg> <n> | i2c wr <addr> <reg> <b..>   registers (reg: 2 hex digits 8-bit, 4 16-bit)\r\n");
+    printf("  i2c scan | i2c probe <addr> | i2c cfg [hz <n>] [timeout <ms>] | i2c recover\r\n");
+    printf("  env [on|off]              BMP280/BME280 driver: state, readings; off frees the bus\r\n");
+    printf("  spi x <bytes..> [z <n>]   SPI2 transfer with CS (PB12) low; spi cfg [mode <0-3>] [hz <n>]\r\n");
+    printf("  uart3 open <baud> | close | send <hex..> | line <text> | flush | count <ms> | stat\r\n");
+    printf("  uart3 read [t <ms>] [n <count>] [until <text>]   bytes from PC11 (hex and text)\r\n");
+    printf("  uart3 nmea [on|off]       print each NMEA sentence from PC11 with its checksum check\r\n");
+    printf("  drdy | drdy wait rise|fall|high|low [ms] | drdy count <ms>   PA8 data ready (strobe off)\r\n");
     printf("  status | can status       counters, mode, error state\r\n");
     printf("  can init [bitrate]        reset + configure the MCP2515 (default 500000)\r\n");
     printf("  can osc <MHz>             module crystal (8 or 16), then re-init\r\n");
@@ -1209,16 +1163,34 @@ static void handle_alarm(char *args)
 
 /* ---------------------------------------------------------------- strobe */
 
-static void strobe_init(void)
+/* PA8 is an output only while a strobe mode is selected. Off (and at boot) it is an input with
+ * a pull-down, because the pod may drive the same LA6 wire as a sensor's data-ready line. */
+static void strobe_pin(int output)
 {
     __HAL_RCC_GPIOA_CLK_ENABLE();
-    STROBE_PORT->BSRR = (uint32_t)STROBE_PIN << 16U;
+    STROBE_PORT->BSRR = (uint32_t)STROBE_PIN << 16U; /* low before it becomes an output */
     GPIO_InitTypeDef g = {0};
     g.Pin = STROBE_PIN;
-    g.Mode = GPIO_MODE_OUTPUT_PP;
-    g.Pull = GPIO_NOPULL;
+    g.Mode = output ? GPIO_MODE_OUTPUT_PP : GPIO_MODE_INPUT;
+    g.Pull = output ? GPIO_NOPULL : GPIO_PULLDOWN;
     g.Speed = GPIO_SPEED_FREQ_MEDIUM;
     HAL_GPIO_Init(STROBE_PORT, &g);
+}
+
+static void strobe_init(void)
+{
+    g_strobe = STROBE_OFF;
+    strobe_pin(0);
+}
+
+int strobe_is_off(void)
+{
+    return g_strobe == STROBE_OFF;
+}
+
+void node_kick(void)
+{
+    iwdg_kick();
 }
 
 static void handle_strobe(char *args)
@@ -1240,7 +1212,7 @@ static void handle_strobe(char *args)
             return;
         }
         g_strobe = (strobe_mode_t)i;
-        STROBE_PORT->BSRR = (uint32_t)STROBE_PIN << 16U;
+        strobe_pin(g_strobe != STROBE_OFF);
     }
     printf("STROBE mode=%s\r\n", STROBE_NAMES[g_strobe]);
 }

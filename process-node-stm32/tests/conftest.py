@@ -3,6 +3,12 @@ the console-driven ``node`` fixture every test file uses.
 
 The node is flashed (when --benchpod-firmware is given) and booted ONCE per session, so the CAN,
 analog and lifecycle files share one boot.
+
+Emulated-sensor tests (test_sensors_*.py) are marked per group (``sensors_i2c``, ``sensors_spi``,
+``sensors_uart``, ``sensors_drdy``, ``sensors_stimulus``, ``sensors_faults``), so ``-m sensors_spi``
+runs one group. Wires that are not on every bench yet gate their tests with an environment
+variable: BENCH_NEW_WIRING=1 (SPI2 on LA9/LA10/LA13/LA14, USART3 on LA7/LA8) and BENCH_LA6_RESISTOR=1 (the
+1 kOhm between PA8 and LA6 that lets the pod drive a data-ready line into PA8).
 """
 
 import contextlib
@@ -10,16 +16,20 @@ import os
 import re
 import statistics
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from embeddedci.benchpod import LoopInputMap
+from embeddedci.benchpod import FpgaImage, LoopInputMap
 
 TARGET_CFG = "target/stm32f4x.cfg"
 FLASH_ATTEMPTS = 3
 OSC_MHZ = int(os.environ.get("CAN_NODE_OSC_MHZ", "8"))
 BITRATE = 500_000
+
+# Test-only sensor definitions and stimuli (the library's own come from the SDK).
+SENSOR_DEFS = Path(__file__).parent / "sensor_defs"
 
 # The emulated BMP280 (test_alarms.py, test_timing.py).
 ENV_ADDR = 0x76
@@ -37,6 +47,39 @@ POINTS = 256
 # Fabric lag: tick = 65535 / 48 MHz = 1.37 ms, k = 150/32768 per tick -> tau ~ 0.3 s.
 TICK_DIV = 65535
 K = 150
+
+
+SENSOR_MARKERS = {
+    "hardware": "needs the bench (pod + node)",
+    "sensors_i2c": "emulated I2C sensors on LA1/LA2, read by the node over I2C1",
+    "sensors_spi": "the emulated SPI sensor on LA9/LA10/LA13/LA14 (BENCH_NEW_WIRING=1)",
+    "sensors_uart": "emulated UART sensors on LA7/LA8 (BENCH_NEW_WIRING=1)",
+    "sensors_drdy": "a data-ready line the pod drives on LA6 into PA8 (BENCH_LA6_RESISTOR=1)",
+    "sensors_stimulus": "values over time from a stimulus",
+    "sensors_faults": "injected sensor faults",
+    "needs_new_wiring": "skips unless BENCH_NEW_WIRING=1 (SPI2 on LA9/LA10/LA13/LA14, USART3 on LA7/LA8)",
+    "needs_la6_resistor": "skips unless BENCH_LA6_RESISTOR=1 (1 kOhm between PA8 and LA6)",
+}
+
+
+def pytest_configure(config):
+    for name, text in SENSOR_MARKERS.items():
+        config.addinivalue_line("markers", f"{name}: {text}")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Gate tests on wires that are not on every bench yet (see the module docstring)."""
+    new_wiring = os.environ.get("BENCH_NEW_WIRING") == "1"
+    la6 = os.environ.get("BENCH_LA6_RESISTOR") == "1"
+    for item in items:
+        if item.get_closest_marker("needs_new_wiring") and not new_wiring:
+            item.add_marker(pytest.mark.skip(
+                reason="the SPI2 (LA9, LA10, LA13, LA14) and USART3 (LA7/LA8) wires are not in place: wire "
+                       "them as in the README, then set BENCH_NEW_WIRING=1"))
+        if item.get_closest_marker("needs_la6_resistor") and not la6:
+            item.add_marker(pytest.mark.skip(
+                reason="install the 1 kOhm resistor on the LA6-PA8 wire first (the pod drives "
+                       "LA6 in this test), then set BENCH_LA6_RESISTOR=1"))
 
 
 def pytest_addoption(parser):
@@ -95,6 +138,17 @@ def wiring(pins):
         i2c_sda=pins.pin_2,   # PB9
         alarm=pins.pin_5,     # PB0, high while any alarm is active
         strobe=pins.pin_6,    # PA8, marks ADC samples / control steps / env reads
+        # The same LA6 wire, through 1 kOhm: an emulated sensor's data-ready output into PA8
+        # (PA8 is an input while the strobe is off). Only the data-ready tests drive it.
+        drdy=pins.pin_6,
+        # SPI2 to the emulated SPI sensor; the pod drives only MISO (and only while CS is low).
+        spi_sclk=pins.pin_9,   # PB13 SCK, DUT drives
+        spi_mosi=pins.pin_10,  # PB15 MOSI, DUT drives
+        spi_miso=pins.pin_13,  # PB14 MISO, pod drives
+        spi_cs=pins.pin_14,    # PB12 CS, DUT drives (software CS)
+        # USART3 to the emulated UART sensor.
+        sensor_uart_tx=pins.pin_8,   # pod -> PC11 USART3 RX
+        sensor_uart_rx=pins.pin_7,   # PC10 USART3 TX -> pod
         # Analog in: pod 3.3 V DAC SMA -> 5-10 kOhm -> PA1 (Nucleo A1). PROCESS_NODE_ANALOG=0 on a
         # bench without that lead skips the analog tests instead of failing them.
         ain_path="3v3",
@@ -212,6 +266,110 @@ class Node:
         self.uart.read_until("APP_OK", timeout=timeout)
         time.sleep(0.2)
 
+    # -- the generic bus commands (emulated sensors) ------------------------------------------
+
+    def i2c_try(self, args, timeout=3.0):
+        """Run ``i2c <args>``; ``(bytes, None)`` on success, ``(None, "nack_addr phase=r")`` style
+        error text otherwise."""
+        m = self.cmd(f"i2c {args}", r"I2C (ok r=([0-9a-f ]*)|err ([^\r\n]*))\r\n", timeout=timeout)
+        if m.group(1).startswith("ok"):
+            return (bytes.fromhex(m.group(2)) if m.group(2) else b""), None
+        return None, m.group(3)
+
+    def i2c(self, args, timeout=3.0):
+        """``i2c <args>``: the bytes read; AssertionError with the node's error otherwise."""
+        data, err = self.i2c_try(args, timeout=timeout)
+        assert err is None, f"i2c {args}: {err}"
+        return data
+
+    def i2c_rd(self, addr, reg, n, reg16=False):
+        """Register read with a repeated START (8- or 16-bit register address)."""
+        return self.i2c(f"rd {addr:02x} {reg:04x} {n}" if reg16 else f"rd {addr:02x} {reg:02x} {n}")
+
+    def i2c_wr(self, addr, reg, data, reg16=False):
+        r = f"{reg:04x}" if reg16 else f"{reg:02x}"
+        return self.i2c(f"wr {addr:02x} {r} {bytes(data).hex()}")
+
+    def i2c_scan(self):
+        m = self.cmd("i2c scan", r"I2C scan found=([0-9a-f ]*)\r\n", timeout=5.0)
+        return [int(a, 16) for a in m.group(1).split()]
+
+    def i2c_cfg(self, args=""):
+        m = self.cmd(f"i2c cfg {args}".strip(), r"I2C (cfg hz=(\d+) timeout_ms=(\d+)|err[^\r\n]*)\r\n")
+        assert m.group(2), m.group(1)
+        return int(m.group(2)), int(m.group(3))
+
+    def env(self, args=""):
+        """``env [on|off]``: driver, status, chip (str), addr (int), temp_c/hum_pct (float)..."""
+        m = self.cmd(f"env {args}".strip(), r"ENV (driver=[^\r\n]*)\r\n")
+        out = {}
+        for k, v in (kv.split("=", 1) for kv in m.group(1).split()):
+            out[k] = (v if k in ("driver", "status", "chip") else int(v, 16) if k == "addr"
+                      else float(v) if k.endswith(("_c", "_pct")) else int(v))
+        return out
+
+    def spi_cfg(self, mode=0, hz=500_000):
+        m = self.cmd(f"spi cfg mode {mode} hz {hz}", r"SPI (cfg mode=(\d) hz=(\d+)|err[^\r\n]*)\r\n")
+        assert m.group(2), m.group(1)
+        return int(m.group(2)), int(m.group(3))
+
+    def spi(self, data, read=0):
+        """One SPI2 transfer: ``data`` then ``read`` zero bytes, CS low throughout. Returns every
+        byte clocked in (the first ``len(data)`` are what came back during the command)."""
+        args = bytes(data).hex() + (f" z {read}" if read else "")
+        m = self.cmd(f"spi x {args}", r"SPI (ok n=\d+ r=([0-9a-f ]*)|err[^\r\n]*)\r\n")
+        assert m.group(1).startswith("ok"), m.group(1)
+        return bytes.fromhex(m.group(2))
+
+    def uart3(self, args, pattern=r"UART3 [^\r\n]*\r\n", timeout=3.0):
+        m = self.cmd(f"uart3 {args}", pattern, timeout=timeout)
+        assert "UART3 err" not in m.group(0), m.group(0)
+        return m
+
+    def uart3_read(self, t_ms=200, n=None, until=None):
+        """``uart3 read``: (bytes, matched)."""
+        args = f"read t {t_ms}" + (f" n {n}" if n else "") + (f" until {until}" if until else "")
+        m = self.uart3(args, r"UART3 rx n=(\d+) match=(\d) hex=([0-9a-f]*) text=[^\r\n]*\r\n",
+                       timeout=t_ms / 1000 + 5.0)
+        return bytes.fromhex(m.group(3)), m.group(2) == "1"
+
+    def uart3_stat(self):
+        m = self.uart3("stat", r"UART3 (open=[^\r\n]*)\r\n")
+        return {k: int(v) for k, v in (kv.split("=", 1) for kv in m.group(1).split())}
+
+    def uart3_count(self, ms):
+        m = self.uart3(f"count {ms}", r"UART3 count ms=\d+ n=(\d+) framing=(\d+)\r\n",
+                       timeout=ms / 1000 + 5.0)
+        return int(m.group(1)), int(m.group(2))
+
+    def nmea(self, args=""):
+        m = self.cmd(f"uart3 nmea {args}".strip(), r"NMEA (mode=[^\r\n]*)\r\n")
+        return {k: (v if k == "mode" else int(v)) for k, v in (kv.split("=", 1) for kv in m.group(1).split())}
+
+    def nmea_lines(self, seconds):
+        """Every ``NMEA ok|bad <sentence>`` line the node prints within the next ``seconds`` (lines
+        already waiting in the serial buffer are dropped): a list of (ok, sentence)."""
+        self.uart.read()                          # drop the backlog: lines printed before now
+        deadline = time.monotonic() + seconds
+        text = ""
+        while time.monotonic() < deadline:
+            text += self.uart.read() or ""
+            time.sleep(0.05)
+        return [(ok == "ok", line) for ok, line in re.findall(r"NMEA (ok|bad) (\S+)\r\n", text)]
+
+    def drdy(self, args="", timeout=8.0):
+        """``drdy [...]``: the reply's fields (ints, plus ``edge``/``kind``), or AssertionError."""
+        m = self.cmd(f"drdy {args}".strip(), r"DRDY ([^\r\n]*)\r\n", timeout=timeout)
+        body = m.group(1)
+        assert not body.startswith("err"), f"drdy {args}: {body}"
+        words = body.split()
+        out = {"result": words[0] if "=" not in words[0] else "level"}
+        for kv in words:
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                out[k] = int(v) if v.lstrip("-").isdigit() else v
+        return out
+
     def status(self):
         m = self.cmd("can status", r"CAN status: ([^\r\n]*)\r\n")
         return dict(kv.split("=", 1) for kv in m.group(1).split())
@@ -258,13 +416,23 @@ def _sensor_mv(temp_c):
 
 
 @pytest.fixture
-def plant(benchpod, wiring, node):
+def plant(request, benchpod, wiring, node):
     """The thermal process the thermostat regulates, emulated by the pod's in-fabric loop (see
     test_thermostat.py). Calibrates the pod's 3.3 V output against the node's ADC, then returns a
     callable: ``plant(ambient_c)`` (re)loads the plant curve; ``plant.short_sensor()`` replaces the
     process with a sensor shorted to ground (0 V on PA1). Everything is stopped afterwards."""
     require_analog(benchpod, wiring, "the thermostat needs both analog leads")
+    if "env" in request.fixturenames:
+        sensor = request.getfixturevalue("env")
+        if "dac_control_loop" in (sensor.started.get("unavailable") or []):
+            pytest.skip("the emulated env sensor runs on the emulation FPGA image, which has no "
+                        "DAC control loop: the thermal plant and the env sensor cannot run together")
     caps = benchpod.capabilities
+    if not caps.dac_control_loop and benchpod.supports("sensors"):
+        # An earlier sensor test left the emulation image loaded: back to the loop image.
+        benchpod.sensors.stop()
+        benchpod.fpga_image(FpgaImage.LOOP)
+        caps = benchpod.capabilities
     if not (caps.dac_control_loop and caps.dac_loop_input_map):
         pytest.skip("pod gateware has no control loop with an input map")
     node.ctl("off")
@@ -316,22 +484,99 @@ def plant(benchpod, wiring, node):
         benchpod.dac_output("off")
 
 
+def require_sensors(benchpod):
+    if not benchpod.supports("sensors"):
+        pytest.skip("the pod's firmware has no sensor emulation (the 'sensors' capability)")
+
+
+def start_env(benchpod, wiring, **values):
+    """The emulated BMP280 the node's env driver reads, as instance ``env``."""
+    return benchpod.sensors.start(
+        "bmp280", instance="env", pins={"sda": wiring.i2c_sda, "scl": wiring.i2c_scl},
+        address=ENV_ADDR, values={"temperature_c": ENV_START_C, "pressure_pa": 101325.0, **values})
+
+
 @pytest.fixture
 def env(benchpod, wiring, node):
-    """Emulated BMP280 at 25 degC, the node seeing it, limit 50 degC. Afterwards the sensor is
-    removed and the node rebooted, so no alarm is left active for the next test."""
+    """Emulated BMP280 (the sensor library's definition) at 25 degC, the node seeing it, limit
+    50 degC. Yields its :class:`Sensor` (``env.set(temperature_c=...)``). Afterwards every emulated
+    sensor is stopped, the pull-ups are off and the node rebooted, so no alarm is left active."""
+    require_sensors(benchpod)
     benchpod.enable_pullup(wiring.i2c_scl, wiring.i2c_sda)
-    benchpod.enable_i2c_sensor("bmp280", sda=wiring.i2c_sda, scl=wiring.i2c_scl,
-                               address=ENV_ADDR, temperature_c=ENV_START_C, pressure_pa=101325.0)
     try:
+        sensor = start_env(benchpod, wiring)
         node.alarm(f"limit {LIMIT_C}")
         wait_alarm(node, lambda a: a["env"] == "ok" and abs(a["env_c"] - ENV_START_C) <= 0.2,
-                    timeout=3.0, what="the node to find the BMP280")
-        yield benchpod
+                   timeout=3.0, what="the node to find the BMP280")
+        yield sensor
     finally:
-        benchpod.disable_i2c_sensor()
+        with contextlib.suppress(Exception):
+            benchpod.sensors.stop()
         benchpod.disable_pullup(wiring.i2c_scl, wiring.i2c_sda)
         node.reboot()
+
+
+@pytest.fixture
+def sensors(benchpod, wiring, node):
+    """``benchpod.sensors`` with the bench set up for the generic bus commands: the node's env
+    driver off (the test owns I2C1), pull-ups on LA1/LA2. Afterwards (bench rules): the
+    stimulus and every emulated sensor stopped, pull-ups off, and the node's buses back to their
+    defaults (USART3 closed, I2C 100 kHz / 25 ms, SPI mode 0 / 500 kHz, env driver on)."""
+    require_sensors(benchpod)
+    node.env("off")
+    benchpod.enable_pullup(wiring.i2c_scl, wiring.i2c_sda)
+    try:
+        yield benchpod.sensors
+    finally:
+        for stop in (benchpod.sensors.stop_stimulus, benchpod.sensors.stop):
+            with contextlib.suppress(Exception):
+                stop()
+        benchpod.disable_pullup(wiring.i2c_scl, wiring.i2c_sda)
+        node.cmd("uart3 close", r"UART3 closed\b[^\r\n]*\r\n")
+        node.cmd("uart3 nmea off", r"NMEA mode=off\b[^\r\n]*\r\n")
+        node.i2c_cfg("hz 100000 timeout 25")
+        node.spi_cfg(0, 500_000)
+        node.cmd("strobe off", r"STROBE mode=off\b[^\r\n]*\r\n")
+        node.env("on")
+
+
+def i2c_pins(wiring, **extra):
+    return {"sda": wiring.i2c_sda, "scl": wiring.i2c_scl, **extra}
+
+
+def spi_pins(wiring, **extra):
+    return {"sclk": wiring.spi_sclk, "mosi": wiring.spi_mosi, "miso": wiring.spi_miso,
+            "cs": wiring.spi_cs, **extra}
+
+
+def uart_pins(wiring):
+    return {"tx": wiring.sensor_uart_tx, "rx": wiring.sensor_uart_rx}
+
+
+def local_def(name):
+    """A test-only definition or stimulus from tests/sensor_defs/ (a path the SDK reads)."""
+    return str(SENSOR_DEFS / f"{name}.yaml")
+
+
+def wait_for(fn, cond, *, timeout, what, interval=0.1):
+    """Poll ``fn()`` until ``cond(value)``; fails with the last value after ``timeout``."""
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        last = fn()
+        if cond(last):
+            return last
+        time.sleep(interval)
+    pytest.fail(f"timed out after {timeout} s waiting for {what}; last: {last}")
+
+
+def crc8_sensirion(data):
+    crc = 0xFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x31) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+    return crc
 
 
 def wait_alarm(node, cond, *, timeout, what):

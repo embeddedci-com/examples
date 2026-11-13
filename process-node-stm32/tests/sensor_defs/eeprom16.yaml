@@ -1,0 +1,23 @@
+format: 1
+kind: i2c
+name: eeprom16
+label: "Test part: 16-bit register addresses (an EEPROM-like ID chip)"
+description: |
+  A 256-byte window at 0x0100..0x01FF behind a two-byte register address, high byte first.
+  An ID string, a serial number the test sets, and scratch bytes the DUT writes. Test-only.
+version: 1.0.0
+license: Apache-2.0
+
+params:
+  - { key: serial, min: 0, max: 65535, default: 4660 }
+
+i2c:
+  address: 0x50
+  alt_addresses: [0x51]
+  register_address_bits: 16
+  page: 0x0100              # the image is 0x0100..0x01FF
+
+registers:
+  - { at: 0x0100, text: "BENCHPOD", name: ID }
+  - { at: 0x0110, u16be: serial, name: SERIAL }
+  - { at: 0x0180, bytes: [0, 0, 0, 0, 0, 0, 0, 0], name: SCRATCH }

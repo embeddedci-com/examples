@@ -1,0 +1,36 @@
+format: 1
+kind: i2c
+name: fifo_accel
+label: "Test part: an I2C accelerometer with a frame FIFO"
+description: |
+  FIFO_EN (bit 0 of CTRL 0x10) starts 6-byte frames (X, Y, Z, s16be, 1 mg/LSB) at 100 Hz.
+  FIFO_LEVEL (0x11) counts the waiting frames; reads of FIFO_DATA (0x12) pop them. Test-only.
+version: 1.0.0
+license: Apache-2.0
+
+params:
+  - { key: accel_x_g, unit: g, min: -8, max: 8, default: 0 }
+  - { key: accel_y_g, unit: g, min: -8, max: 8, default: 0 }
+  - { key: accel_z_g, unit: g, min: -8, max: 8, default: 1 }
+
+i2c:
+  address: 0x1D
+
+registers:
+  - { at: 0x0F, u8: 0x5F, name: WHO_AM_I, writable: false }
+  - { at: 0x10, u8: 0x00, name: CTRL }
+  - { at: 0x11, u8: "min(fifo_level, 255)", name: FIFO_LEVEL }
+
+fifo:
+  at: 0x12
+  depth: 32
+  frame:
+    - "byte(sat_s16(accel_x_g * 1000), 1)"
+    - "byte(sat_s16(accel_x_g * 1000), 0)"
+    - "byte(sat_s16(accel_y_g * 1000), 1)"
+    - "byte(sat_s16(accel_y_g * 1000), 0)"
+    - "byte(sat_s16(accel_z_g * 1000), 1)"
+    - "byte(sat_s16(accel_z_g * 1000), 0)"
+  rate_hz: 100
+  enabled: "reg[0x10] & 1"
+  overflow: drop_newest     # the pod's gateware drops new frames when full (drop_oldest acts the same)

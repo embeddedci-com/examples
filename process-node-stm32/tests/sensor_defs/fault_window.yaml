@@ -1,0 +1,9 @@
+format: 1
+kind: stimulus
+name: fault_window
+rate_hz: 50
+signals:
+  temperature_c:
+    - { shape: hold, value: 22, duration_s: 4 }
+faults:
+  - { at_s: 1, duration_s: 1.5, type: no_response }

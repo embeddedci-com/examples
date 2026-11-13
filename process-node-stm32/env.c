@@ -3,7 +3,11 @@
 #include "stm32f4xx_hal.h"
 
 #define BMP280_CHIP_ID 0x58U
+#define BME280_CHIP_ID 0x60U
 #define REG_CALIB 0x88U
+#define REG_CALIB_H1 0xA1U
+#define REG_CALIB_H2 0xE1U
+#define REG_CTRL_HUM 0xF2U
 #define REG_CHIP_ID 0xD0U
 #define REG_RESET 0xE0U
 #define REG_CTRL_MEAS 0xF4U
@@ -14,8 +18,11 @@
 static I2C_HandleTypeDef g_i2c;
 static env_state_t g_env;
 static bmp280_calib_t g_calib;
+static bme280_hcalib_t g_hcalib;
 static uint32_t g_next_ms;
 static uint32_t g_fail_run;
+static uint32_t g_hz = 100000U;
+static int g_enabled = 1;
 
 void HAL_I2C_MspInit(I2C_HandleTypeDef *hi2c)
 {
@@ -46,7 +53,7 @@ void HAL_I2C_MspDeInit(I2C_HandleTypeDef *hi2c)
 static void bus_init(void)
 {
     g_i2c.Instance = I2C1;
-    g_i2c.Init.ClockSpeed = 100000U;
+    g_i2c.Init.ClockSpeed = g_hz;
     g_i2c.Init.DutyCycle = I2C_DUTYCYCLE_2;
     g_i2c.Init.OwnAddress1 = 0U;
     g_i2c.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
@@ -56,11 +63,36 @@ static void bus_init(void)
     (void)HAL_I2C_Init(&g_i2c);
 }
 
-/* A failed transfer can leave the peripheral BUSY; start it over. */
+/* A failed transfer can leave the peripheral BUSY (a target held SDA low, the F4's I2C does not
+ * always notice the STOP that follows); a software reset clears it, then start it over. */
 static void bus_recover(void)
 {
     (void)HAL_I2C_DeInit(&g_i2c);
+    __HAL_RCC_I2C1_CLK_ENABLE();
+    I2C1->CR1 |= I2C_CR1_SWRST;
+    I2C1->CR1 &= ~I2C_CR1_SWRST;
     bus_init();
+}
+
+void env_i2c_reset(void)
+{
+    bus_recover();
+}
+
+int env_i2c_set_hz(uint32_t hz)
+{
+    if (hz < 10000U || hz > 400000U)
+    {
+        return -1;
+    }
+    g_hz = hz;
+    bus_recover();
+    return 0;
+}
+
+uint32_t env_i2c_hz(void)
+{
+    return g_hz;
 }
 
 static int rd(uint8_t addr, uint8_t reg, uint8_t *buf, uint16_t n)
@@ -92,7 +124,7 @@ static int probe(void)
     {
         uint8_t id = 0U;
         uint8_t cal[24];
-        if (rd(addrs[i], REG_CHIP_ID, &id, 1U) != 0 || id != BMP280_CHIP_ID)
+        if (rd(addrs[i], REG_CHIP_ID, &id, 1U) != 0 || (id != BMP280_CHIP_ID && id != BME280_CHIP_ID))
         {
             continue;
         }
@@ -101,13 +133,29 @@ static int probe(void)
             continue;
         }
         HAL_Delay(3); /* start-up after reset: 2 ms */
-        if (rd(addrs[i], REG_CALIB, cal, sizeof(cal)) != 0 || wr(addrs[i], REG_CONFIG, 0x00U) != 0 ||
-            wr(addrs[i], REG_CTRL_MEAS, 0x27U) != 0) /* T x1, P x1, normal mode */
+        if (rd(addrs[i], REG_CALIB, cal, sizeof(cal)) != 0 || wr(addrs[i], REG_CONFIG, 0x00U) != 0)
+        {
+            continue;
+        }
+        if (id == BME280_CHIP_ID)
+        {
+            /* Humidity: its trim, and ctrl_hum, which only takes effect with the next ctrl_meas. */
+            uint8_t h1 = 0U;
+            uint8_t h[7];
+            if (rd(addrs[i], REG_CALIB_H1, &h1, 1U) != 0 || rd(addrs[i], REG_CALIB_H2, h, sizeof(h)) != 0 ||
+                wr(addrs[i], REG_CTRL_HUM, 0x01U) != 0)
+            {
+                continue;
+            }
+            bme280_hcalib_parse(h1, h, &g_hcalib);
+        }
+        if (wr(addrs[i], REG_CTRL_MEAS, 0x27U) != 0) /* T x1, P x1, normal mode */
         {
             continue;
         }
         bmp280_calib_parse(cal, &g_calib);
         g_env.addr = addrs[i];
+        g_env.chip = (id == BME280_CHIP_ID) ? ENV_CHIP_BME280 : ENV_CHIP_BMP280;
         return 0;
     }
     return -1;
@@ -115,8 +163,9 @@ static int probe(void)
 
 static int read_sample(void)
 {
-    uint8_t d[6];
-    if (rd(g_env.addr, REG_DATA, d, sizeof(d)) != 0)
+    uint8_t d[8];
+    uint16_t n = (g_env.chip == ENV_CHIP_BME280) ? 8U : 6U;
+    if (rd(g_env.addr, REG_DATA, d, n) != 0)
     {
         return -1;
     }
@@ -129,6 +178,12 @@ static int read_sample(void)
     int32_t t_fine;
     g_env.temp_dc = bmp280_temp_cdc(&g_calib, adc_t, &t_fine) / 10;
     g_env.press_pa = bmp280_press_pa(&g_calib, adc_p, t_fine);
+    if (g_env.chip == ENV_CHIP_BME280)
+    {
+        int32_t adc_h = (int32_t)(((uint32_t)d[6] << 8) | d[7]);
+        /* %RH in Q22.10 -> tenths of a percent */
+        g_env.hum_dpct = (int32_t)((bme280_hum_q10(&g_hcalib, adc_h, t_fine) * 10U + 512U) >> 10);
+    }
     return 0;
 }
 
@@ -145,12 +200,36 @@ void env_init(void)
 
 int env_due(uint32_t now_ms)
 {
-    return (int32_t)(now_ms - g_next_ms) >= 0;
+    return g_enabled && (int32_t)(now_ms - g_next_ms) >= 0;
+}
+
+void env_set_enabled(int on)
+{
+    if (on && !g_enabled)
+    {
+        /* Start over as at boot: probe (soft reset + setup) on the next pass. */
+        g_env.status = ENV_ABSENT;
+        g_env.chip = ENV_CHIP_NONE;
+        g_fail_run = 0U;
+        g_next_ms = HAL_GetTick();
+        g_env.seq++;
+    }
+    else if (!on && g_enabled)
+    {
+        g_env.status = ENV_ABSENT;
+        g_env.seq++;
+    }
+    g_enabled = on ? 1 : 0;
+}
+
+int env_enabled(void)
+{
+    return g_enabled;
 }
 
 void env_tick(uint32_t now_ms)
 {
-    if ((int32_t)(now_ms - g_next_ms) < 0)
+    if (!g_enabled || (int32_t)(now_ms - g_next_ms) < 0)
     {
         return;
     }
@@ -184,25 +263,4 @@ void env_tick(uint32_t now_ms)
 const env_state_t *env_state(void)
 {
     return &g_env;
-}
-
-int env_i2c_raw(uint8_t addr, const uint8_t *w, uint16_t nw, uint8_t *r, uint16_t nr,
-                uint32_t delay_ms)
-{
-    if (nw > 0U &&
-        HAL_I2C_Master_Transmit(&g_i2c, (uint16_t)(addr << 1), (uint8_t *)w, nw, I2C_TIMEOUT_MS) != HAL_OK)
-    {
-        bus_recover();
-        return -1;
-    }
-    if (delay_ms > 0U)
-    {
-        HAL_Delay(delay_ms);
-    }
-    if (nr > 0U && HAL_I2C_Master_Receive(&g_i2c, (uint16_t)(addr << 1), r, nr, I2C_TIMEOUT_MS) != HAL_OK)
-    {
-        bus_recover();
-        return -1;
-    }
-    return 0;
 }

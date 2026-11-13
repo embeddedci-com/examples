@@ -66,4 +66,35 @@ static inline uint32_t bmp280_press_pa(const bmp280_calib_t *c, int32_t adc_p, i
     return (uint32_t)(p / 256);
 }
 
+/* BME280 humidity trim: H1 at 0xA1, H2..H6 in the 7 bytes from 0xE1 (datasheet 4.2.2). */
+typedef struct
+{
+    uint8_t h1, h3;
+    int16_t h2, h4, h5;
+    int8_t h6;
+} bme280_hcalib_t;
+
+static inline void bme280_hcalib_parse(uint8_t a1, const uint8_t e[7], bme280_hcalib_t *c)
+{
+    c->h1 = a1;
+    c->h2 = (int16_t)(e[0] | (e[1] << 8));
+    c->h3 = e[2];
+    c->h4 = (int16_t)(((int16_t)(int8_t)e[3] * 16) | (e[4] & 0x0F));
+    c->h5 = (int16_t)(((int16_t)(int8_t)e[5] * 16) | (e[4] >> 4));
+    c->h6 = (int8_t)e[6];
+}
+
+/* Humidity in %RH as Q22.10 (divide by 1024), bme280_compensate_H_int32 of datasheet 4.2.3. */
+static inline uint32_t bme280_hum_q10(const bme280_hcalib_t *c, int32_t adc_h, int32_t t_fine)
+{
+    int32_t v = t_fine - 76800;
+    v = (((((adc_h << 14) - (((int32_t)c->h4) << 20) - (((int32_t)c->h5) * v)) + 16384) >> 15) *
+         (((((((v * ((int32_t)c->h6)) >> 10) * (((v * ((int32_t)c->h3)) >> 11) + 32768)) >> 10) +
+            2097152) * ((int32_t)c->h2) + 8192) >> 14));
+    v = v - (((((v >> 15) * (v >> 15)) >> 7) * ((int32_t)c->h1)) >> 4);
+    v = v < 0 ? 0 : v;
+    v = v > 419430400 ? 419430400 : v;
+    return (uint32_t)(v >> 12);
+}
+
 #endif

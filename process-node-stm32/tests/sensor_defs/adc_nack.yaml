@@ -1,0 +1,26 @@
+format: 1
+kind: i2c
+name: adc_nack
+label: "Test part: an ADC that does not acknowledge reads while it converts"
+description: |
+  Writing 0x01 to CONFIG (0x01) starts a 20 ms conversion; RESULT (0x02) follows CONFIG, so a
+  read right after that write gets it. A read during it is not acknowledged
+  (its address NACKs), like a part that is busy. Test-only.
+version: 1.0.0
+license: Apache-2.0
+
+params:
+  - { key: input_mv, unit: mV, min: 0, max: 4095, default: 1234 }
+
+i2c:
+  address: 0x49
+
+registers:
+  - { at: 0x00, u8: 0xA5, name: ID, writable: false }
+  - { at: 0x01, u8: 0x00, name: CONFIG }
+  - { at: 0x02, u16be: input_mv, name: RESULT }   # right after CONFIG: write 01 01, then read 2
+
+conversion:
+  trigger: 0x01
+  time_us: 20000
+  while_busy: nack

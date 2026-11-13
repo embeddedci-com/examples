@@ -1,0 +1,9 @@
+format: 1
+kind: stimulus
+name: ramp_temperature
+rate_hz: 50
+signals:
+  temperature_c:
+    - { shape: hold, value: 20, duration_s: 1 }
+    - { shape: ramp, end: 40, duration_s: 4 }
+    - { shape: hold, value: 40, duration_s: 1 }
