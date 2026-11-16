@@ -111,7 +111,8 @@ With 8 MHz the fastest bitrate is 500 kbit/s; 1 Mbit/s needs a 16 MHz crystal.
 | `env [on\|off]` | `ENV driver=on status=ok\|absent\|lost chip=bmp280\|bme280 addr=76 temp_c= press_pa= hum_pct= reads= fails=`; `off` stops the driver, `on` starts over (probe, soft reset, setup) |
 | `spi x <bytes..> [z <n>]` | one SPI2 transfer with CS low: the bytes, then n zero bytes; `SPI ok n=<n> r=<every byte clocked in>` |
 | `spi cfg [mode <0-3>] [hz <n>]` | mode and the fastest clock at or below hz (16 MHz / 2..256; default mode 0, 500 kHz); `SPI cfg mode= hz=` |
-| `uart3 open <baud>` / `uart3 close` | USART3 8N1, 1200-1000000 baud |
+| `uart3 open <baud> [format]` / `uart3 close` | USART3, 1200-1000000 baud; format 8N1 (default), 8E1, 8O1, 8N2, 8E2 or 8O2; `uart3 stat` counts parity errors |
+| `uart3 echo [on|off]` | echo every byte received on PC11 straight back on PC10 (loopback tests; off again on open) |
 | `uart3 send <hex..>` / `uart3 line <text>` | send bytes, or text plus CR LF; `UART3 sent n=<n>` |
 | `uart3 read [t <ms>] [n <count>] [until <text>]` | collect for t ms (default 200), stop early after count bytes or when the text (rest of the line) arrives; `UART3 rx n= match=0\|1 hex=<bytes> text=<escaped>` |
 | `uart3 count <ms>` / `uart3 flush` / `uart3 stat` | bytes in a window (discarded); drop what is buffered; `UART3 open= baud= rx= tx= pending= framing= noise= overrun= dropped=` |
