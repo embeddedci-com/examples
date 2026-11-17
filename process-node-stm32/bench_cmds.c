@@ -449,11 +449,12 @@ static uint32_t g_nmea_lines, g_nmea_ok, g_nmea_bad, g_nmea_junk;
 static void print_uart3_stat(void)
 {
     const uart3_stats_t *s = uart3_stats();
-    printf("UART3 open=%u baud=%lu rx=%lu tx=%lu pending=%u framing=%lu noise=%lu overrun=%lu "
-           "dropped=%lu\r\n",
-           s->open, (unsigned long)s->baud, (unsigned long)s->rx_total, (unsigned long)s->tx_total,
-           uart3_pending(), (unsigned long)s->framing, (unsigned long)s->noise,
-           (unsigned long)s->overrun, (unsigned long)s->dropped);
+    printf("UART3 open=%u baud=%lu format=%s rx=%lu tx=%lu pending=%u framing=%lu noise=%lu overrun=%lu "
+           "dropped=%lu parity=%lu\r\n",
+           s->open, (unsigned long)s->baud, s->open ? s->format : "-", (unsigned long)s->rx_total,
+           (unsigned long)s->tx_total, uart3_pending(), (unsigned long)s->framing,
+           (unsigned long)s->noise, (unsigned long)s->overrun, (unsigned long)s->dropped,
+           (unsigned long)s->parity);
 }
 
 static void print_nmea_stat(void)
@@ -671,12 +672,37 @@ static void handle_uart3(char *args)
     if (strcmp(sub, "open") == 0)
     {
         uint32_t baud;
-        if (parse_dec(strtok(NULL, " "), &baud, 1000000U) != 0 || uart3_open(baud) != 0)
+        const char *fmt = NULL;
+        int bad = parse_dec(strtok(NULL, " "), &baud, 1000000U) != 0;
+        if (!bad)
         {
-            printf("UART3 err usage: uart3 open <1200..1000000>\r\n");
+            fmt = strtok(NULL, " ");
+            if (fmt == NULL)
+            {
+                fmt = "8N1";
+            }
+            bad = strlen(fmt) != 3U || fmt[0] != '8' || (fmt[2] != '1' && fmt[2] != '2') ||
+                  uart3_open_format(baud, fmt[1], (uint8_t)(fmt[2] - '0')) != 0;
+        }
+        if (bad)
+        {
+            printf("UART3 err usage: uart3 open <1200..1000000> [8N1|8E1|8O1|8N2|8E2|8O2]\r\n");
             return;
         }
-        printf("UART3 open baud=%lu\r\n", (unsigned long)baud);
+        printf("UART3 open baud=%lu format=%s\r\n", (unsigned long)baud, fmt);
+        return;
+    }
+    if (strcmp(sub, "echo") == 0)
+    {
+        const char *v = strtok(NULL, " ");
+        uint8_t on = (v == NULL || strcmp(v, "on") == 0) ? 1U : 0U;
+        if (v != NULL && strcmp(v, "on") != 0 && strcmp(v, "off") != 0)
+        {
+            printf("UART3 err usage: uart3 echo [on|off]\r\n");
+            return;
+        }
+        uart3_set_echo(on);
+        printf("UART3 echo %s\r\n", on ? "on" : "off");
         return;
     }
     if (strcmp(sub, "close") == 0)

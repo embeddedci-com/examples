@@ -831,7 +831,7 @@ static void print_help(void)
     printf("  i2c target [<addr> | off | mem <reg> <n>]   answer as a 256-byte register file (env goes off)\r\n");
     printf("  env [on|off]              BMP280/BME280 driver: state, readings; off frees the bus\r\n");
     printf("  spi x <bytes..> [z <n>]   SPI2 transfer with CS (PB12) low; spi cfg [mode <0-3>] [hz <n>]\r\n");
-    printf("  uart3 open <baud> | close | send <hex..> | line <text> | flush | count <ms> | stat\r\n");
+    printf("  uart3 open <baud> [8N1|8E1|8O1|8N2|8E2|8O2] | close | send <hex..> | line <text> | flush | count <ms> | stat\r\n");
     printf("  uart3 read [t <ms>] [n <count>] [until <text>]   bytes from PC11 (hex and text)\r\n");
     printf("  uart3 nmea [on|off]       print each NMEA sentence from PC11 with its checksum check\r\n");
     printf("  drdy | drdy wait rise|fall|high|low [ms] | drdy count <ms>   PA8 data ready (strobe off)\r\n");

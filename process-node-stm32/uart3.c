@@ -9,6 +9,7 @@ static volatile uint8_t g_ring[UART3_RING_SIZE];
 static volatile uint16_t g_head;
 static volatile uint16_t g_tail;
 static volatile uart3_stats_t g_st;
+static volatile uint8_t g_echo;
 
 static void pins_input(void)
 {
@@ -21,11 +22,18 @@ static void pins_input(void)
 
 int uart3_open(uint32_t baud)
 {
-    if (baud < 1200U || baud > 1000000U)
+    return uart3_open_format(baud, 'N', 1U);
+}
+
+int uart3_open_format(uint32_t baud, char parity, uint8_t stop_bits)
+{
+    if (baud < 1200U || baud > 1000000U || (parity != 'N' && parity != 'E' && parity != 'O') ||
+        (stop_bits != 1U && stop_bits != 2U))
     {
         return -1;
     }
     uart3_close();
+    g_echo = 0U;
     __HAL_RCC_GPIOC_CLK_ENABLE();
     __HAL_RCC_USART3_CLK_ENABLE();
     GPIO_InitTypeDef g = {0};
@@ -48,7 +56,18 @@ int uart3_open(uint32_t baud)
     g_head = g_tail = 0U;
     g_st.baud = baud;
     g_st.open = 1U;
-    USART3->CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_RXNEIE | USART_CR1_UE;
+    g_st.format[0] = '8';
+    g_st.format[1] = parity;
+    g_st.format[2] = (char)('0' + stop_bits);
+    g_st.format[3] = '\0';
+    /* With parity the word is 9 bits (M): 8 data bits and the parity bit. */
+    uint32_t cr1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_RXNEIE | USART_CR1_UE;
+    if (parity != 'N')
+    {
+        cr1 |= USART_CR1_M | USART_CR1_PCE | (parity == 'O' ? USART_CR1_PS : 0U);
+    }
+    USART3->CR2 = (stop_bits == 2U) ? USART_CR2_STOP_1 : 0U;
+    USART3->CR1 = cr1;
     NVIC_SetPriority(USART3_IRQn, 1);
     NVIC_EnableIRQ(USART3_IRQn);
     return 0;
@@ -109,6 +128,11 @@ uint16_t uart3_pending(void)
     return (uint16_t)((g_head + UART3_RING_SIZE - g_tail) % UART3_RING_SIZE);
 }
 
+void uart3_set_echo(uint8_t on)
+{
+    g_echo = on;
+}
+
 void uart3_flush(void)
 {
     g_tail = g_head;
@@ -132,11 +156,20 @@ void USART3_IRQHandler(void)
         {
             g_st.noise++;
         }
+        if (sr & USART_SR_PE)
+        {
+            g_st.parity++;
+        }
         if ((sr & USART_SR_RXNE) == 0U)
         {
             continue;
         }
         g_st.rx_total++;
+        if (g_echo && (USART3->SR & USART_SR_TXE))
+        {
+            USART3->DR = byte; /* same baud both ways, so TX keeps up byte for byte */
+            g_st.tx_total++;
+        }
         uint16_t next = (uint16_t)((g_head + 1U) % UART3_RING_SIZE);
         if (next == g_tail)
         {
