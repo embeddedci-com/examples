@@ -9,6 +9,10 @@ Emulated-sensor tests (test_sensors_*.py) are marked per group (``sensors_i2c``,
 runs one group. Wires that are not on every bench yet gate their tests with an environment
 variable: BENCH_NEW_WIRING=1 (SPI2 on LA9/LA10/LA13/LA14, USART3 on LA7/LA8) and BENCH_LA6_RESISTOR=1 (the
 1 kOhm between PA8 and LA6 that lets the pod drive a data-ready line into PA8).
+
+The LA channels come from the bench's wiring profile, ``wiring/process-node-stm32.json``, stored on the
+pod under the name ``process-node-stm32`` and loaded by that name (``bp.load_wiring``) for the run.
+The pod's default profile is not used or changed.
 """
 
 import contextlib
@@ -126,31 +130,66 @@ def benchpod_la_voltage():
     return 3.3  # NUCLEO-F446RE I/O voltage
 
 
+#: The bench's wiring profile, stored on the pod under this name (README, "Wiring profile").
+WIRING_PROFILE = "process-node-stm32"
+WIRING_FILE = Path(__file__).resolve().parent.parent / "wiring" / f"{WIRING_PROFILE}.json"
+
+
+def _explicit_wiring(config):
+    """True when the run names its own wiring (--benchpod-wiring, --benchpod-wiring-profile,
+    BENCHPOD_WIRING or BENCHPOD_WIRING_PROFILE): then the conftest does not load its profile."""
+    return bool(config.getoption("benchpod_wiring") or config.getoption("benchpod_wiring_profile")
+                or os.environ.get("BENCHPOD_WIRING") or os.environ.get("BENCHPOD_WIRING_PROFILE"))
+
+
 @pytest.fixture(scope="session")
-def wiring(pins):
-    """How THIS bench is wired: DUT signal -> BenchPod LA channel."""
+def bench_profile(benchpod, pytestconfig):
+    """The pod's ``process-node-stm32`` wiring profile, loaded by name for this connection (the
+    pod's default profile stays as it is). A run that names its own wiring keeps that one."""
+    if _explicit_wiring(pytestconfig):
+        return benchpod.wiring
+    if benchpod.stored_wiring(WIRING_PROFILE) is None:
+        pytest.exit(f"the pod has no wiring profile {WIRING_PROFILE!r}; store it once with "
+                    f"`benchpod wiring save {WIRING_FILE} --name {WIRING_PROFILE}` "
+                    f"(or run with --benchpod-wiring {WIRING_FILE})", returncode=4)
+    return benchpod.load_wiring(WIRING_PROFILE)
+
+
+@pytest.fixture(scope="session")
+def wiring(bench_profile, pytestconfig):
+    """How THIS bench is wired, read from its wiring profile (wiring/process-node-stm32.json)."""
+    prof = bench_profile
+
+    def la(name):
+        try:
+            return prof.la(name)
+        except ValueError:
+            pytest.exit(f"wiring profile {prof.profile_name or 'in use'!r} has no {name}; it must match "
+                        f"{WIRING_FILE.name}", returncode=4)
+
     return SimpleNamespace(
-        swclk=pins.pin_11,
-        swdio=pins.pin_12,
-        nreset=True,
-        uart_rx=pins.pin_3,   # pod samples the DUT's TX here
-        uart_tx=pins.pin_4,   # pod drives the DUT's RX here
-        efuse=pins.efuse,
-        i2c_scl=pins.pin_1,   # PB8, the pod emulates the BMP280 here
-        i2c_sda=pins.pin_2,   # PB9
-        alarm=pins.pin_5,     # PB0, high while any alarm is active
-        strobe=pins.pin_6,    # PA8, marks ADC samples / control steps / env reads
+        swclk=la("swd_swclk"),
+        swdio=la("swd_swdio"),
+        nreset=prof.swd_nreset,
+        target=prof.swd_target or TARGET_CFG,
+        uart_rx=la("uart_rx"),   # LA3: the pod samples the DUT's TX here
+        uart_tx=la("uart_tx"),   # LA4: the pod drives the DUT's RX here
+        efuse=pytestconfig.getoption("benchpod_efuse") or prof.efuse or 1,
+        i2c_scl=la("i2c_scl"),   # LA1, PB8, the pod emulates the BMP280 here
+        i2c_sda=la("i2c_sda"),   # LA2, PB9
+        alarm=la("ALARM"),       # LA5, PB0, high while any alarm is active
+        strobe=la("STROBE"),     # LA6, PA8, marks ADC samples / control steps / env reads
         # The same LA6 wire, through 1 kOhm: an emulated sensor's data-ready output into PA8
         # (PA8 is an input while the strobe is off). Only the data-ready tests drive it.
-        drdy=pins.pin_6,
+        drdy=la("STROBE"),
         # SPI2 to the emulated SPI sensor; the pod drives only MISO (and only while CS is low).
-        spi_sclk=pins.pin_9,   # PB13 SCK, DUT drives
-        spi_mosi=pins.pin_10,  # PB15 MOSI, DUT drives
-        spi_miso=pins.pin_13,  # PB14 MISO, pod drives
-        spi_cs=pins.pin_14,    # PB12 CS, DUT drives (software CS)
+        spi_sclk=la("SENSOR_SPI_SCK"),   # LA9, PB13 SCK, DUT drives
+        spi_mosi=la("SENSOR_SPI_MOSI"),  # LA10, PB15 MOSI, DUT drives
+        spi_miso=la("SENSOR_SPI_MISO"),  # LA13, PB14 MISO, pod drives
+        spi_cs=la("SENSOR_SPI_CS"),      # LA14, PB12 CS, DUT drives (software CS)
         # USART3 to the emulated UART sensor.
-        sensor_uart_tx=pins.pin_8,   # pod -> PC11 USART3 RX
-        sensor_uart_rx=pins.pin_7,   # PC10 USART3 TX -> pod
+        sensor_uart_tx=la("SENSOR_UART_TX"),  # LA8, pod -> PC11 USART3 RX
+        sensor_uart_rx=la("SENSOR_UART_RX"),  # LA7, PC10 USART3 TX -> pod
         # Analog in: pod 3.3 V DAC SMA -> 5-10 kOhm -> PA1 (Nucleo A1). PROCESS_NODE_ANALOG=0 on a
         # bench without that lead skips the analog tests instead of failing them.
         ain_path="3v3",
@@ -175,13 +214,13 @@ def _flash(bp, wiring, firmware):
         if attempt > 0:
             bp.power_off(wiring.efuse)
         result = bp.flash(
-            file=firmware, target=TARGET_CFG,
+            file=firmware, target=wiring.target,
             swclk=wiring.swclk, swdio=wiring.swdio, nreset=wiring.nreset,
             target_power=wiring.efuse, check=False,
         )
         if not result.ok and result.target_unreachable and wiring.nreset:
             result = bp.flash(
-                file=firmware, target=TARGET_CFG,
+                file=firmware, target=wiring.target,
                 swclk=wiring.swclk, swdio=wiring.swdio, nreset=False,
                 target_power=wiring.efuse, check=False,
             )

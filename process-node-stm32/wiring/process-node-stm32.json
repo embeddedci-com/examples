@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "la_mv": 3300,
+  "efuse": 1,
+  "uart_rx": 3,
+  "uart_tx": 4,
+  "uart_baud": 115200,
+  "i2c_scl": 1,
+  "i2c_sda": 2,
+  "i2c_addr": "0x76",
+  "swd_swclk": 11,
+  "swd_swdio": 12,
+  "swd_nreset": true,
+  "swd_target": "target/stm32f4x.cfg",
+  "signals": [
+    {"name": "ALARM", "la": 5, "direction": "input", "active_low": false,
+     "description": "PB0, high while any alarm is active"},
+    {"name": "STROBE", "la": 6, "direction": "bidir", "active_low": false,
+     "description": "PA8 via 1 kOhm: the node's strobe, or a data-ready line the pod drives"},
+    {"name": "SENSOR_UART_RX", "la": 7, "direction": "input", "active_low": false,
+     "description": "PC10 USART3 TX -> pod (emulated UART sensor)"},
+    {"name": "SENSOR_UART_TX", "la": 8, "direction": "output", "active_low": false,
+     "description": "pod -> PC11 USART3 RX (emulated UART sensor)"},
+    {"name": "SENSOR_SPI_SCK", "la": 9, "direction": "input", "active_low": false,
+     "description": "PB13 SPI2 SCK (emulated SPI sensor, the node drives)"},
+    {"name": "SENSOR_SPI_MOSI", "la": 10, "direction": "input", "active_low": false,
+     "description": "PB15 SPI2 MOSI (the node drives)"},
+    {"name": "SENSOR_SPI_MISO", "la": 13, "direction": "output", "active_low": false,
+     "description": "PB14 SPI2 MISO (the pod drives, only while CS is low)"},
+    {"name": "SENSOR_SPI_CS", "la": 14, "direction": "input", "active_low": true,
+     "description": "PB12 SPI2 CS (the node drives)"}
+  ]
+}
