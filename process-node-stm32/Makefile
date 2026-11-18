@@ -46,7 +46,7 @@ LDFLAGS := \
 	-specs=nano.specs \
 	-specs=nosys.specs
 
-APP_SRCS := main.c analog.c env.c i2cbus.c i2ctarget.c spi2.c uart3.c bench_cmds.c mcp2515.c syscalls.c sysmem.c system_stm32f4xx.c
+APP_SRCS := main.c rl78emu.c rl78emu_port.c analog.c env.c i2cbus.c i2ctarget.c spi2.c uart3.c bench_cmds.c mcp2515.c syscalls.c sysmem.c system_stm32f4xx.c
 
 HAL_SRCS := \
 	stm32f4xx_hal.c \
@@ -102,5 +102,7 @@ test-host: | $(BUILD_DIR)
 	$(BUILD_DIR)/test_mcp2515_timing
 	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -I. tests/test_proc.c -o $(BUILD_DIR)/test_proc
 	$(BUILD_DIR)/test_proc
+	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -I. tests/test_rl78emu.c rl78emu.c -o $(BUILD_DIR)/test_rl78emu
+	$(BUILD_DIR)/test_rl78emu
 
 .PHONY: all clean flash test-host

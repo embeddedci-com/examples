@@ -26,8 +26,10 @@
  *             PB15 MOSI / PB14 MISO / PB12 CS (spi), USART3 PC10 TX / PC11 RX (uart3).
  *
  * Console: USART1 PA9 (TX) / PA10 (RX), 115200 8N1. Type "help".
+ * PA9 held low through reset starts the RL78 boot ROM emulator instead (rl78emu.h, README).
  */
 
+#include "rl78emu.h"
 #include "stm32f4xx_hal.h"
 #include "alarm.h"
 #include "analog.h"
@@ -42,7 +44,7 @@
 #include <string.h>
 
 #define FW_NAME "process-node"
-#define FW_VERSION "0.3.0"
+#define FW_VERSION "0.3.1"
 
 #define CMD_BUF_SIZE 200
 
@@ -179,6 +181,12 @@ int main(void)
     reset_cause_capture();
     HAL_Init();
     SystemClock_Config();
+    /* TOOL0 strap: the console TX held low through reset starts the RL78 boot ROM emulator
+       (rl78emu.h) instead of the node, so a Protocol A programmer can be tested on this board. */
+    if (rl78emu_strap())
+    {
+        rl78emu_main();
+    }
 
     HAL_DBGMCU_EnableDBGSleepMode();
     HAL_DBGMCU_EnableDBGStopMode();

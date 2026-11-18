@@ -164,6 +164,16 @@ SECTIONS
     __bss_end__ = _ebss;
   } >RAM
 
+  /* Not zeroed at startup: the RL78 emulator's 68 KB flash (rl78emu_port.c fills it itself), so
+     the C runtime reaches main() fast enough to see the TOOL0 strap. */
+  .noinit (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.noinit)
+    *(.noinit*)
+    . = ALIGN(4);
+  } >RAM
+
   /* User_heap_stack section, used to check that there is enough "RAM" Ram  type memory left */
   ._user_heap_stack :
   {
