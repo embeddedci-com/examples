@@ -60,7 +60,8 @@ practice; `can selftest` checks it. If it is ever flaky, put a TXS0108E in betwe
 - UART sensor (emulated by the pod) on USART3: **LA8 -> PC11 (RX), PC10 (TX) -> LA7**. Closed
   (both pins inputs) until `uart3 open`.
 
-All LA wiring at a glance (the `wiring` fixture in `tests/conftest.py` is the same table):
+All LA wiring at a glance. [`wiring/process-node-stm32.json`](wiring/process-node-stm32.json) is the
+same table as a wiring profile (see [Wiring profile](#wiring-profile)):
 
 | LA | Nucleo | Signal | Driven by |
 |---|---|---|---|
@@ -78,6 +79,28 @@ All LA wiring at a glance (the `wiring` fixture in `tests/conftest.py` is the sa
 | LA12 | SWDIO | SWD | both |
 | LA13 | PB14 | SPI2 MISO | pod |
 | LA14 | PB12 | SPI2 CS | node |
+
+### Wiring profile
+
+This bench is not wired like the pod's default pins (UART RX on LA5, I2C SDA on LA1 and SCL on LA2):
+here the console is on LA3/LA4, I2C SCL on LA1 and SDA on LA2, and LA5 is the alarm. The bench has
+its own wiring profile, [`wiring/process-node-stm32.json`](wiring/process-node-stm32.json), with every
+pin in the table above: the roles (UART, I2C, SWD with NRST), the named signals (`ALARM`, `STROBE`,
+`SENSOR_UART_*`, `SENSOR_SPI_*`), 3.3 V I/O and internal 5 V target power.
+
+Store it on the pod once, under its own name, so the web app, BenchPod Desktop, the CLI, the SDK and
+an AI agent all find it:
+
+```bash
+benchpod wiring save process-node-stm32/wiring/process-node-stm32.json --name process-node-stm32
+```
+
+Saving does not change the pod's default profile (unless it is the pod's first profile). The HIL
+tests load it by name (`bp.load_wiring("process-node-stm32")`) and stop with that command when the
+pod does not have it. In your own scripts, `BenchPod(conn, wiring_profile="process-node-stm32")`, or
+in an agent, `connect(wiring_profile="process-node-stm32")`, does the same. A run that names its own
+wiring (`--benchpod-wiring`, `--benchpod-wiring-profile`, `BENCHPOD_WIRING`,
+`BENCHPOD_WIRING_PROFILE`) uses that instead.
 
 ## Build
 
