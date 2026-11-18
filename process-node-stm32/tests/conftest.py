@@ -59,6 +59,7 @@ SENSOR_MARKERS = {
     "sensors_faults": "injected sensor faults",
     "needs_new_wiring": "skips unless BENCH_NEW_WIRING=1 (SPI2 on LA9/LA10/LA13/LA14, USART3 on LA7/LA8)",
     "needs_la6_resistor": "skips unless BENCH_LA6_RESISTOR=1 (1 kOhm between PA8 and LA6)",
+    "rl78": "RL78 Protocol A programming on LA3 against the node's RL78 boot ROM emulator",
 }
 
 

@@ -136,6 +136,34 @@ With 8 MHz the fastest bitrate is 500 kbit/s; 1 Mbit/s needs a 16 MHz crystal.
 
 Received frames print as `CAN rx id=0x123 ext=0 rtr=0 dlc=2 data=0102`.
 
+## RL78 boot ROM emulator
+
+Holding the console TX (PA9, the bench's LA3) low through reset starts an emulated RL78 boot
+ROM instead of the node, the way an RL78 enters its programming mode when TOOL0 is low at reset.
+It speaks RL78 Protocol A (Renesas R01AN0815) on that one wire, so a programmer can be tested on
+this board with no RL78 on the bench:
+
+- The part is an R5F100LE (RL78/G13): 64 KB code flash at 000000H, 4 KB data flash at 0F1000H,
+  1 KB blocks. Its flash lives in RAM, so every entry starts with an erased part.
+- Commands: Reset, Baud Rate Set (115200, 250000, 500000, 1000000), Silicon Signature, Block
+  Erase, Block Blank Check, Programming, Verify, Checksum, Security Set, Get and Release, with the
+  guide's frames, checksums and status codes. Like real flash, a byte is written only when blank
+  (an erase comes first), and the security flags are enforced.
+- The line is open drain, single-wire half duplex, 1 stop bit from the emulator (a programmer sends
+  2). It answers no sooner than the end of the programmer's second stop bit.
+- TOOL0 has to stay low for about 6 ms after the reset release (the emulator sets up its flash in
+  that time). A real RL78 needs only 723 us plus tHD, so a programmer written for the real part
+  should hold it longer when it runs against this board.
+- A normal boot is unchanged: the strap is sampled with the internal pull-up on, so an undriven
+  LA3 never starts the emulator.
+
+`tests/rl78_programmer.py` is a minimal Protocol A programmer over the BenchPod's one-wire UART
+(`open_uart(half_duplex=True, entry=UartEntry(...))`, pod firmware with gateware v57), and
+`tests/test_rl78.py` (marker `rl78`) runs it against the emulator: entry and signature, program,
+verify and checksum, data flash, parameter errors, every baud rate, security, and a normal boot
+afterwards. The protocol core (`rl78emu.c`) is also covered on the host by
+`tests/test_rl78emu.c` (`make test-host`).
+
 ## HIL tests
 
 ```bash
