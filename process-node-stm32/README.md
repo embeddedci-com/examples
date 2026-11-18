@@ -164,6 +164,42 @@ verify and checksum, data flash, parameter errors, every baud rate, security, an
 afterwards. The protocol core (`rl78emu.c`) is also covered on the host by
 `tests/test_rl78emu.c` (`make test-host`).
 
+## RS-485 mock (Modbus RTU)
+
+`modbus start <addr> <baud> [8E1|8N2|...] [delay <us>] [de on|off]` turns USART3 into an RS-485
+bus with one Modbus RTU device on it, as a half-duplex transceiver presents it to the pod. It
+uses the wires the UART sensors use, plus the LA6 data-ready wire as the transceiver's DE:
+
+| Transceiver | Pod | Node |
+| --- | --- | --- |
+| DI (the pod sends) | LA8 | PC11, USART3 RX |
+| RO (the pod listens) | LA7 | PC10, USART3 TX |
+| DE + /RE | LA6 (GPIO) | PA8, through 1 kOhm (strobe off) |
+
+- The device: holding registers 0-63 (0 at start), input registers 0-15 (1000H + index), coils
+  0-63; functions 01, 03, 04, 05, 06, 08 (return query data), 0F and 10; exceptions 01, 02 and
+  03; broadcasts (address 0) are carried out and not answered; a bad CRC or another address gets
+  no answer. `modbus reg <i> [<v>]` reads or sets a holding register from the console.
+- Frames end after 3.5 characters of silence (1750 us above 19200 baud); a gap of more than 1.5
+  characters, or a framing or parity error, drops the frame. The device answers `delay` us after
+  the request (default 5000), never sooner than 3.5 characters.
+- With `de on` the transceiver's rules apply: a byte the pod sends while DE is low never reaches
+  the device (`undriven`), and a reply byte while DE is still high never reaches the pod
+  (`collisions`), as the pod's receiver is off then. `de off` is a transceiver with automatic
+  direction control: no DE wire, only the protocol is tested.
+- `modbus stat` reports the requests, replies, exceptions, CRC and frame errors, other addresses,
+  broadcasts, `undriven` bytes and `collisions`.
+
+`tests/modbus_master.py` is a Modbus RTU master over the pod, and `tests/test_rs485.py` (marker
+`rs485`, BENCH_NEW_WIRING=1 BENCH_LA6_RESISTOR=1) runs it: registers, coils, exceptions, the silent
+cases, four frame formats, a parity mismatch, DE never raised, released too early and too late,
+the docs page's example unchanged, and the turnaround a host-switched DE allows.
+
+Measured on the bench (LAN): switching DE with a GPIO command from the host takes about 27 ms, so
+DE drops about 25 ms after the request's last byte. A device answering after 30 ms or more works
+every time, after 20 ms about 2 times in 10, after 5 ms never. A device that answers faster needs
+a transceiver with automatic direction control (`de off` here).
+
 ## HIL tests
 
 ```bash
