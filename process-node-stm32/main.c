@@ -30,6 +30,7 @@
  */
 
 #include "rl78emu.h"
+#include "rs485mock.h"
 #include "stm32f4xx_hal.h"
 #include "alarm.h"
 #include "analog.h"
@@ -1422,9 +1423,15 @@ static void SPI1_Init(void)
     SPI1->CR1 |= SPI_CR1_SPE;
 }
 
-/* Only here to wake the main loop; can_service() reads the INT level. */
+/* Wakes the main loop for the MCP2515 (can_service() reads the INT level), and times the RS-485
+   mock's DE falling edge on PA8 (rs485mock.c). */
 void EXTI9_5_IRQHandler(void)
 {
+    if (EXTI->PR & GPIO_PIN_8)
+    {
+        EXTI->PR = GPIO_PIN_8;
+        rs485_de_edge();
+    }
     EXTI->PR = INT_PIN;
 }
 

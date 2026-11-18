@@ -21,21 +21,46 @@ static volatile uint8_t s_rx[MB_FRAME_MAX];
 static volatile uint16_t s_rx_len;
 static volatile uint8_t s_rx_bad;
 static volatile uint32_t s_rx_last;      /* cycle count of the last byte */
-static uint32_t s_char_cyc, s_t15_cyc, s_t35_cyc;
+static uint32_t s_char_cyc, s_t15_cyc, s_t35_cyc, s_late_cyc;
+static volatile uint32_t s_de_fell;      /* cycle count of DE's last falling edge (EXTI line 8) */
+#define DE_EXTI (1UL << 8)
 
 static int de_high(void)
 {
     return (DE_PORT->IDR & DE_PIN) != 0U;
 }
 
+/* From EXTI9_5_IRQHandler (main.c): DE fell. */
+void rs485_de_edge(void)
+{
+    s_de_fell = dwt_cycles();
+}
+
+/* Was the pod's driver on for the byte that just completed? RXNE comes in the middle of its
+   (first) stop bit, and a master that drives DE well drops it at the end of the last stop bit,
+   often before this interrupt runs: a byte still counts when DE fell within its stop bit (or the
+   edge is still pending, EXTI9_5 being lower priority than USART3). */
+static int byte_driven(uint32_t now)
+{
+    if (de_high())
+    {
+        return 1;
+    }
+    if (EXTI->PR & DE_EXTI)
+    {
+        return 1;          /* it fell just now, the edge not yet taken */
+    }
+    return now - s_de_fell < s_late_cyc;
+}
+
 static void on_byte(uint8_t b, uint32_t sr)
 {
-    if (s_st.de && !de_high())
+    uint32_t now = dwt_cycles();
+    if (s_st.de && !byte_driven(now))
     {
         s_st.undriven++;   /* the pod's driver was off: the byte never reached the bus */
         return;
     }
-    uint32_t now = dwt_cycles();
     if (s_rx_len > 0U && now - s_rx_last > s_t15_cyc)
     {
         s_rx_bad = 1U;     /* a gap inside the frame (the main loop ends frames at 3.5) */
@@ -87,6 +112,20 @@ int rs485_start(uint8_t addr, uint32_t baud, char parity, uint8_t stop_bits, uin
     /* above 19200 baud the spec fixes t1.5 = 750 us and t3.5 = 1750 us */
     s_t15_cyc = baud > 19200U ? us_to_cyc(750U) : (s_char_cyc * 3U) / 2U;
     s_t35_cyc = baud > 19200U ? us_to_cyc(1750U) : (s_char_cyc * 7U) / 2U;
+    /* a DE that fell up to 2 bit times (the stop bits) plus 20 us of interrupt latency ago */
+    s_late_cyc = (s_char_cyc / bits) * 2U + us_to_cyc(20U);
+    s_de_fell = dwt_cycles() - s_late_cyc - 1U;
+    if (s_st.de)
+    {
+        /* EXTI line 8 on PA8, falling edge (the pin stays the strobe's input with its pull-down) */
+        __HAL_RCC_SYSCFG_CLK_ENABLE();
+        SYSCFG->EXTICR[2] &= ~SYSCFG_EXTICR3_EXTI8;          /* port A */
+        EXTI->FTSR |= DE_EXTI;
+        EXTI->RTSR &= ~DE_EXTI;
+        EXTI->PR = DE_EXTI;
+        EXTI->IMR |= DE_EXTI;
+        NVIC_EnableIRQ(EXTI9_5_IRQn);
+    }
     s_rx_len = 0U;
     s_rx_bad = 0U;
     uart3_set_rx_hook(on_byte);
@@ -101,6 +140,8 @@ void rs485_stop(void)
     }
     uart3_set_rx_hook(NULL);
     uart3_close();
+    EXTI->IMR &= ~DE_EXTI;
+    EXTI->PR = DE_EXTI;
     s_st.on = 0U;
 }
 

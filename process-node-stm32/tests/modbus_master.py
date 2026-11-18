@@ -35,9 +35,13 @@ class NoReply(Exception):
 
 class ModbusMaster:
     def __init__(self, bp, *, rx, tx, de, baud: int = 19200, parity: str = "even",
-                 stop_bits: int = 1, release_margin: float = 0.002) -> None:
+                 stop_bits: int = 1, release_margin: float = 0.002, pod_de: bool = False) -> None:
+        """``de``: the LA channel on DE + /RE, or None (an automatic-direction transceiver).
+        ``pod_de``: the pod switches DE itself (``open_uart(de=...)``, gateware v58) instead of
+        the host's GPIO calls around each request."""
         self.bp = bp
         self.rx, self.tx, self.de_pin = rx, tx, de
+        self.pod_de = pod_de and de is not None
         self.baud, self.parity, self.stop_bits = baud, parity, stop_bits
         self.release_margin = release_margin
         self.uart = None
@@ -48,12 +52,13 @@ class ModbusMaster:
         return (1 + 8 + (self.parity != "none") + self.stop_bits) / self.baud
 
     def open(self) -> "ModbusMaster":
-        if self.de is None and self.de_pin is not None:
+        if self.de is None and self.de_pin is not None and not self.pod_de:
             self.de = self.bp.gpio(self.de_pin, "output", level=0)   # listen until we send
         if self.uart is None:
+            extra = {"de": self.de_pin} if self.pod_de else {}
             self.uart = self.bp.open_uart(rx=self.rx, tx=self.tx, baud=self.baud,
                                           parity=self.parity, stop_bits=self.stop_bits,
-                                          encoding="latin-1")
+                                          encoding="latin-1", **extra)
         return self
 
     def close_uart(self) -> None:

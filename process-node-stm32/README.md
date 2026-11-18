@@ -198,7 +198,14 @@ the docs page's example unchanged, and the turnaround a host-switched DE allows.
 Measured on the bench (LAN): switching DE with a GPIO command from the host takes about 27 ms, so
 DE drops about 25 ms after the request's last byte. A device answering after 30 ms or more works
 every time, after 20 ms about 2 times in 10, after 5 ms never. A device that answers faster needs
-a transceiver with automatic direction control (`de off` here).
+the pod to switch DE itself: `open_uart(de=6)` (gateware v58, feature `uart_de`) drives DE from
+before the first start bit to the end of the last stop bit, and `test_pod_de` gets every reply at
+9600, 19200 and 115200 baud with the device answering 3.5 characters after the request. A
+transceiver with automatic direction control (`de off` here) works too.
+
+DE's falling edge is timed by EXTI line 8 on PA8: a byte counts as driven when DE fell within its
+stop bit, as a master that drives DE well drops it at the end of the last stop bit, often before
+the byte's receive interrupt has run.
 
 ## HIL tests
 

@@ -51,7 +51,7 @@ class Bus:
         return {k: v for k, v in re.findall(r"(\w+)=(\S+)", m.group(1))}
 
     def start(self, baud=19200, fmt="8E1", delay_us=5000, addr=SLAVE, parity=None, stop_bits=None,
-              de=False):
+              de=False, pod_de=False):
         """Start the mock and set the master up for the same line (or for parity / stop_bits).
         ``de``: the master switches DE on LA6 and the mock enforces it; else neither does."""
         if self.master is not None:
@@ -61,7 +61,7 @@ class Bus:
         par = {"N": "none", "E": "even", "O": "odd"}[fmt[1]] if parity is None else parity
         self.master = ModbusMaster(self.bp, rx=self.wiring.sensor_uart_rx,
                                    tx=self.wiring.sensor_uart_tx, de=self.wiring.drdy if de else None,
-                                   baud=baud,
+                                   baud=baud, pod_de=pod_de,
                                    parity=par, stop_bits=int(fmt[2]) if stop_bits is None else stop_bits)
         return self.master
 
@@ -252,3 +252,21 @@ def test_docs_example(bus):
                           parity="even", encoding="latin-1") as uart:
         assert read_holding_registers(uart, m.de, SLAVE, 0) == [4242]
         assert not bus.bp.status().get("uart_rx_parity_error")
+
+
+@pytest.mark.parametrize("baud,fmt", [(9600, "8N2"), (19200, "8E1"), (115200, "8N1")])
+@pytest.mark.parametrize("delay_us", [0, 1000, 5000])
+def test_pod_de(bus, baud, fmt, delay_us):
+    """The pod switches DE itself (``open_uart(de=...)``, gateware v58): the transceiver rules on,
+    and the device answering as soon as the spec allows (3.5 characters after the request, with
+    ``delay 0``), after 1 ms and after 5 ms. No reply byte may be lost and nothing undriven."""
+    if not bus.bp.supports("uart_de"):
+        pytest.skip("the pod's firmware does not drive DE (uart_de, gateware v58)")
+    bus.start(baud=baud, fmt=fmt, delay_us=delay_us, de=True, pod_de=True)
+    m = bus.m
+    for i in range(10):
+        m.write_registers(SLAVE, 0, [i, 0x5A5A, baud & 0xFFFF])
+        assert m.read_holding(SLAVE, 0, 3) == [i, 0x5A5A, baud & 0xFFFF]
+    s = bus.stat()
+    assert (s["undriven"], s["collisions"], s["frame"], s["replies"]) == ("0", "0", "0", "20")
+

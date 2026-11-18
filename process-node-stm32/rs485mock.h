@@ -7,8 +7,9 @@
  *   transceiver DE + /RE             LA6 -> PA8 (through 1 kOhm; pulled down, so it listens)
  *
  * The rules a real transceiver enforces, so a master's direction handling is tested too:
- *  - a byte from the pod reaches the bus only while DE is high (sampled as the byte completes);
- *    others are counted as `undriven` and never reach the device;
+ *  - a byte from the pod reaches the bus only while DE is high, up to the end of its stop bit (a
+ *    falling edge of DE is timed by EXTI line 8); others are counted as `undriven` and never
+ *    reach the device;
  *  - the device's reply reaches the pod only while DE is low (DE high also turns the pod's
  *    receiver off); a reply byte sent while DE is high is lost and counted as a `collision`.
  *
@@ -42,6 +43,8 @@ int  rs485_start(uint8_t addr, uint32_t baud, char parity, uint8_t stop_bits, ui
                  uint8_t de);
 void rs485_stop(void);
 void rs485_set_delay(uint32_t delay_us);
+/* From EXTI9_5_IRQHandler: DE (PA8) fell. */
+void rs485_de_edge(void);
 /* Main loop: end of frame detection and the reply. */
 void rs485_service(void);
 const rs485_stats_t *rs485_stats(void);
