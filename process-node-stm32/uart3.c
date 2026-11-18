@@ -10,6 +10,7 @@ static volatile uint16_t g_head;
 static volatile uint16_t g_tail;
 static volatile uart3_stats_t g_st;
 static volatile uint8_t g_echo;
+static void (*volatile g_hook)(uint8_t byte, uint32_t sr);
 
 static void pins_input(void)
 {
@@ -128,6 +129,11 @@ uint16_t uart3_pending(void)
     return (uint16_t)((g_head + UART3_RING_SIZE - g_tail) % UART3_RING_SIZE);
 }
 
+void uart3_set_rx_hook(void (*hook)(uint8_t byte, uint32_t sr))
+{
+    g_hook = hook;
+}
+
 void uart3_set_echo(uint8_t on)
 {
     g_echo = on;
@@ -165,6 +171,11 @@ void USART3_IRQHandler(void)
             continue;
         }
         g_st.rx_total++;
+        if (g_hook != NULL)
+        {
+            g_hook(byte, sr);
+            continue;
+        }
         if (g_echo && (USART3->SR & USART_SR_TXE))
         {
             USART3->DR = byte; /* same baud both ways, so TX keeps up byte for byte */

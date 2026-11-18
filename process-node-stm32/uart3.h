@@ -37,5 +37,8 @@ uint16_t uart3_pending(void);
 void uart3_flush(void);
 /* Echo every received byte straight back on TX (from the interrupt), for loopback tests. */
 void uart3_set_echo(uint8_t on);
+/* Hand every received byte (with the status register it came with) to hook, from the interrupt,
+   instead of the ring: the RS-485 mock (rs485mock.c) times its frames this way. NULL: the ring. */
+void uart3_set_rx_hook(void (*hook)(uint8_t byte, uint32_t sr));
 
 #endif

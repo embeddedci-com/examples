@@ -5,6 +5,7 @@
 #include "i2ctarget.h"
 #include "spi2.h"
 #include "stm32f4xx_hal.h"
+#include "rs485mock.h"
 #include "uart3.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -527,6 +528,7 @@ static void nmea_line_done(void)
 
 void bench_service(void)
 {
+    rs485_service();
     if (!g_nmea_on)
     {
         return;
@@ -972,6 +974,116 @@ static void handle_env(char *args)
 
 /* ---------------------------------------------------------------- entry points */
 
+/* ---------------------------------------------------------------- modbus (RS-485 mock) */
+
+static void print_modbus_stat(void)
+{
+    const rs485_stats_t *st = rs485_stats();
+    const mb_slave_t *s = rs485_slave();
+    printf("MODBUS stat on=%u addr=%u baud=%lu format=%s delay_us=%lu de=%u requests=%lu replies=%lu "
+           "exceptions=%lu crc=%lu frame=%lu other=%lu broadcast=%lu undriven=%lu collisions=%lu "
+           "last_fn=%02X\r\n",
+           st->on, s->addr, (unsigned long)st->baud, st->on ? st->format : "-",
+           (unsigned long)st->delay_us, st->de, (unsigned long)s->requests, (unsigned long)s->replies,
+           (unsigned long)s->exceptions, (unsigned long)s->crc_errors,
+           (unsigned long)st->frame_errors, (unsigned long)s->other_addr,
+           (unsigned long)s->broadcasts, (unsigned long)st->undriven,
+           (unsigned long)st->collisions, s->last_fn);
+}
+
+/* modbus start <addr> <baud> [8N1|8E1|...] [delay <us>] [de on|off] | stop | stat | delay <us> | reg <i> [<v>] */
+static void handle_modbus(char *args)
+{
+    char *sub = strtok(args, " ");
+    if (sub == NULL || strcmp(sub, "stat") == 0)
+    {
+        print_modbus_stat();
+        return;
+    }
+    if (strcmp(sub, "start") == 0)
+    {
+        uint32_t addr, baud, delay = 5000U, de = 1U;
+        const char *fmt = "8E1";
+        int bad = parse_dec(strtok(NULL, " "), &addr, 247U) != 0 ||
+                  parse_dec(strtok(NULL, " "), &baud, 1000000U) != 0;
+        for (char *t = strtok(NULL, " "); !bad && t != NULL; t = strtok(NULL, " "))
+        {
+            if (strcmp(t, "delay") == 0)
+            {
+                bad = parse_dec(strtok(NULL, " "), &delay, 100000U) != 0;
+            }
+            else if (strcmp(t, "de") == 0)
+            {
+                const char *v = strtok(NULL, " ");
+                bad = v == NULL || (strcmp(v, "on") != 0 && strcmp(v, "off") != 0);
+                de = (v != NULL && strcmp(v, "on") == 0) ? 1U : 0U;
+            }
+            else if (strlen(t) == 3U && t[0] == '8' && (t[2] == '1' || t[2] == '2'))
+            {
+                fmt = t;
+            }
+            else
+            {
+                bad = 1;
+            }
+        }
+        if (!bad && de && !strobe_is_off())
+        {
+            printf("MODBUS err PA8 is the strobe: strobe off first (PA8 reads DE)\r\n");
+            return;
+        }
+        if (bad || rs485_start((uint8_t)addr, baud, fmt[1], (uint8_t)(fmt[2] - '0'), delay, (uint8_t)de) != 0)
+        {
+            printf("MODBUS err usage: modbus start <1..247> <1200..1000000> [8N1|8E1|8O1|8N2|8E2|8O2] "
+                   "[delay <0..100000 us>] [de on|off]\r\n");
+            return;
+        }
+        printf("MODBUS ok on addr=%lu baud=%lu format=%s delay_us=%lu de=%s\r\n", (unsigned long)addr,
+               (unsigned long)baud, fmt, (unsigned long)delay, de ? "on" : "off");
+        return;
+    }
+    if (strcmp(sub, "stop") == 0)
+    {
+        rs485_stop();
+        printf("MODBUS ok off\r\n");
+        return;
+    }
+    if (strcmp(sub, "delay") == 0)
+    {
+        uint32_t d;
+        if (parse_dec(strtok(NULL, " "), &d, 100000U) != 0)
+        {
+            printf("MODBUS err usage: modbus delay <0..100000 us>\r\n");
+            return;
+        }
+        rs485_set_delay(d);
+        printf("MODBUS ok delay_us=%lu\r\n", (unsigned long)d);
+        return;
+    }
+    if (strcmp(sub, "reg") == 0)
+    {
+        uint32_t i, v;
+        int bad = parse_dec(strtok(NULL, " "), &i, MB_HOLD_REGS - 1U) != 0;
+        const char *vs = bad ? NULL : strtok(NULL, " ");
+        if (!bad && vs != NULL)
+        {
+            bad = parse_dec(vs, &v, 0xFFFFU) != 0;
+            if (!bad)
+            {
+                rs485_slave()->hold[i] = (uint16_t)v;
+            }
+        }
+        if (bad)
+        {
+            printf("MODBUS err usage: modbus reg <0..63> [<0..65535>]\r\n");
+            return;
+        }
+        printf("MODBUS reg i=%lu v=%u\r\n", (unsigned long)i, rs485_slave()->hold[i]);
+        return;
+    }
+    printf("MODBUS err usage: modbus start|stop|stat|delay|reg\r\n");
+}
+
 void bench_init(void)
 {
     dwt_init();
@@ -1004,6 +1116,10 @@ int bench_command(char *cmd)
     else if (is_cmd(cmd, "uart3", &args))
     {
         handle_uart3(args);
+    }
+    else if (is_cmd(cmd, "modbus", &args))
+    {
+        handle_modbus(args);
     }
     else if (is_cmd(cmd, "drdy", &args))
     {

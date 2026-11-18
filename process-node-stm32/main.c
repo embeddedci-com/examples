@@ -44,7 +44,7 @@
 #include <string.h>
 
 #define FW_NAME "process-node"
-#define FW_VERSION "0.3.1"
+#define FW_VERSION "0.3.2"
 
 #define CMD_BUF_SIZE 200
 
@@ -843,6 +843,9 @@ static void print_help(void)
     printf("  uart3 read [t <ms>] [n <count>] [until <text>]   bytes from PC11 (hex and text)\r\n");
     printf("  uart3 nmea [on|off]       print each NMEA sentence from PC11 with its checksum check\r\n");
     printf("  drdy | drdy wait rise|fall|high|low [ms] | drdy count <ms>   PA8 data ready (strobe off)\r\n");
+    printf("  modbus start <addr> <baud> [8E1..] [delay <us>] [de on|off] | stop | stat | delay <us> | reg <i> [<v>]\r\n");
+    printf("                            RS-485 mock: a Modbus RTU device on USART3, DE on PA8 (strobe off;\r\n");
+    printf("                            de off: an automatic-direction transceiver, no DE wire)\r\n");
     printf("  status | can status       counters, mode, error state\r\n");
     printf("  can init [bitrate]        reset + configure the MCP2515 (default 500000)\r\n");
     printf("  can osc <MHz>             module crystal (8 or 16), then re-init\r\n");
