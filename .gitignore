@@ -9,3 +9,4 @@ venv/
 *.swp
 *~
 .DS_Store
+embeddedci-runs/

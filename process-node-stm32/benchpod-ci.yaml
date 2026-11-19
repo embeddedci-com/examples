@@ -1,0 +1,34 @@
+# Run the process-node hardware suite with `benchpod ci` (benchpod-cli 0.10+):
+#
+#   cd process-node-stm32 && benchpod ci --pod <your pod>
+#
+# Builds the firmware, flashes it, checks the boot, measures the idle current and runs the
+# pytest suite. Results land in ./embeddedci-runs/<time>-process-node-hil/ (run.json, junit.xml,
+# traces of failed tests). See the "Test runs" docs on embeddedci.com.
+version: 1
+suite: process-node-hil
+dut: process-node
+wiring: process-node-stm32            # the stored wiring profile (wiring/process-node-stm32.json)
+firmware:
+  build: make -j8
+  file: build/process-node.elf
+env:
+  # This bench has the SPI2/USART3 wires and the 1 kOhm resistor on LA6 (see the README);
+  # set them to 0 on a bench without them and those tests skip.
+  BENCH_NEW_WIRING: "1"
+  BENCH_LA6_RESISTOR: "1"
+timeout: 30m
+keep:
+  traces: failed
+steps:
+  - id: boot
+    power_cycle: {until: "APP_OK", timeout: 10s}
+    required: true
+    expect:
+      boot_ms: {max: 3000, drift: "50%"}
+  - id: idle-current
+    measure_power: {duration: 2s}
+    expect:
+      mean_ma: {max: 150}
+  - id: hil
+    pytest: {path: tests, args: [-m, hardware, -q]}
