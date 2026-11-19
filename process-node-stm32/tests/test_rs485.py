@@ -40,6 +40,9 @@ class Bus:
         self.master = None
 
     def cmd(self, line, pattern):
+        """``pattern`` must take the reply to the end of its line. Firmware up to 3.10.12 keeps
+        the bytes a UART session received and did not read, and hands them to the next session:
+        the rest of a console line then arrives as the start of the next Modbus reply."""
         if self.master is not None:
             self.master.close_uart()
         if self.node.uart is None:
@@ -57,7 +60,7 @@ class Bus:
         if self.master is not None:
             self.master.close()
         self.cmd(f"modbus start {addr} {baud} {fmt} delay {delay_us} de {'on' if de else 'off'}",
-                 r"MODBUS ok on")
+                 r"MODBUS ok on[^\r\n]*\r\n")   # the whole line: see cmd()
         par = {"N": "none", "E": "even", "O": "odd"}[fmt[1]] if parity is None else parity
         self.master = ModbusMaster(self.bp, rx=self.wiring.sensor_uart_rx,
                                    tx=self.wiring.sensor_uart_tx, de=self.wiring.drdy if de else None,
@@ -75,7 +78,7 @@ class Bus:
         if self.master is not None:
             self.master.close()
             self.master = None
-        self.cmd("modbus stop", r"MODBUS ok off")
+        self.cmd("modbus stop", r"MODBUS ok off[^\r\n]*\r\n")
 
 
 DE_DELAY_US = 100000   # a device slow enough for a master that switches DE from the host
