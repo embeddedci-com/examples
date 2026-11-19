@@ -1,4 +1,4 @@
-# Run the process-node hardware suite with `benchpod ci` (benchpod-cli 0.10+):
+# Run the process-node hardware suite with `benchpod ci` (needs a benchpod-cli that has `ci`):
 #
 #   cd process-node-stm32 && benchpod ci --pod <your pod>
 #
