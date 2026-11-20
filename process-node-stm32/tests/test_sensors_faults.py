@@ -123,16 +123,45 @@ def test_uart_garbage(node, gps):
     assert [l for ok, l in lines if ok], "sentences again after the fault"
 
 
+def _epochs(lines):
+    """GPS epochs among the node's NMEA lines: one $GPRMC per 1 Hz epoch."""
+    return sum(1 for ok, line in lines if ok and line.startswith("$GPRMC"))
+
+
+def _bus(gps):
+    bus = gps.status()["bus"]
+    return bus["messages"], bus["dropped"]
+
+
 @pytest.mark.sensors_uart
 @pytest.mark.needs_new_wiring
 def test_uart_drop(node, gps):
+    """drop 0.5: the pod skips whole 1 Hz epochs (about 7 sentences each), each with chance 0.5.
+
+    Over 12 epochs some are kept and some dropped: none kept, or as many as the 12 s without the
+    fault, has a chance of 0.05% to 0.2% (a 5 s window with a 0.2-0.8 sentence ratio failed
+    about 6% of the time). What the node received is then checked against
+    the pod's own counters (bus.messages: epochs sent, bus.dropped: epochs skipped), not against
+    the 0.5 the coin should give."""
+    window = 12.0
     node.nmea("on")
     time.sleep(1.2)
-    base = sum(1 for ok, _ in node.nmea_lines(5.0) if ok)
+    total = _epochs(node.nmea_lines(window))
+    assert total >= 10, f"{total} epochs in {window:.0f} s from a 1 Hz GPS"
+
     gps.fault("drop", value=0.5)
     time.sleep(1.0)
-    kept = node.nmea_lines(5.0)
-    assert all(ok for ok, _ in kept), "a dropped sentence is dropped whole, never cut"
-    ratio = len(kept) / base
-    assert 0.2 <= ratio <= 0.8, f"{len(kept)} of about {base} sentences with drop 0.5"
+    sent0, dropped0 = _bus(gps)
+    lines = node.nmea_lines(window)
+    sent1, dropped1 = _bus(gps)
     gps.clear_fault()
+
+    assert all(ok for ok, _ in lines), "a dropped sentence is dropped whole, never cut"
+    kept = _epochs(lines)
+    sent, dropped = sent1 - sent0, dropped1 - dropped0
+    assert 0 < kept < total, f"{kept} of {total} epochs kept with drop 0.5 (pod: sent {sent}, dropped {dropped})"
+    assert sent > 0 and dropped > 0, f"pod counters over the window: sent {sent}, dropped {dropped}"
+    # the counters are read just before and after the window, so an epoch at either edge may
+    # count on one side only
+    assert abs(kept - sent) <= 2, f"node saw {kept} epochs, the pod sent {sent}"
+    assert sent + dropped >= 10, f"pod: {sent} sent + {dropped} dropped epochs in {window:.0f} s"
