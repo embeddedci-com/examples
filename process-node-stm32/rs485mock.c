@@ -36,10 +36,11 @@ void rs485_de_edge(void)
     s_de_fell = dwt_cycles();
 }
 
-/* Was the pod's driver on for the byte that just completed? RXNE comes in the middle of its
-   (first) stop bit, and a master that drives DE well drops it at the end of the last stop bit,
-   often before this interrupt runs: a byte still counts when DE fell within its stop bit (or the
-   edge is still pending, EXTI9_5 being lower priority than USART3). */
+/* Was the pod's driver on for the byte that just completed? RXNE comes late in its (first) stop
+   bit, and a master that drives DE well drops it at the end of the last stop bit, often before
+   this interrupt runs: a byte still counts when DE fell within its stop bit (or the edge is still
+   pending, EXTI9_5 being lower priority than USART3). EXTI9_5_IRQHandler stores the time before
+   it clears the pending bit, so a preempted handler is seen by one test or the other. */
 static int byte_driven(uint32_t now)
 {
     if (de_high())
