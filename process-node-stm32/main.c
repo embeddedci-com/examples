@@ -45,7 +45,7 @@
 #include <string.h>
 
 #define FW_NAME "process-node"
-#define FW_VERSION "0.3.2"
+#define FW_VERSION "0.3.3"
 
 #define CMD_BUF_SIZE 200
 
@@ -1424,13 +1424,17 @@ static void SPI1_Init(void)
 }
 
 /* Wakes the main loop for the MCP2515 (can_service() reads the INT level), and times the RS-485
-   mock's DE falling edge on PA8 (rs485mock.c). */
+   mock's DE falling edge on PA8 (rs485mock.c). The edge is timed before its pending bit is
+   cleared: USART3 preempts this handler, and the mock takes a byte as driven while the bit is
+   pending or once the time is stored. Clearing first left a gap in which a byte whose RXNE came
+   just after DE fell (the last byte of a request, DE dropping at the end of its stop bit) found
+   neither and was counted undriven: test_pod_de lost about one request in ten. */
 void EXTI9_5_IRQHandler(void)
 {
     if (EXTI->PR & GPIO_PIN_8)
     {
-        EXTI->PR = GPIO_PIN_8;
         rs485_de_edge();
+        EXTI->PR = GPIO_PIN_8;
     }
     EXTI->PR = INT_PIN;
 }
