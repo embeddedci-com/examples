@@ -68,7 +68,7 @@ class SimpleBus:
         self.sda, self.scl = la(wiring.i2c_sda), la(wiring.i2c_scl)
 
     def start(self, hz, pullups="pod"):
-        return self.bp.command({"cmd": "i2c_start", "sda": self.sda, "scl": self.scl, "hz": hz,
+        return self.bp.command({"cmd": "i2c_start", "sda": self.sda, "scl": self.scl, "clock_hz": hz,
                                 "pullups": pullups})
 
     def xfer(self, addr, write=b"", read=0):
@@ -122,9 +122,10 @@ def test_i2c_master_nack_and_scan(i2c_bus, node):
 def test_i2c_master_needs_pullups(benchpod, wiring, node):
     require_master(benchpod)
     benchpod.disable_pullup(wiring.i2c_scl, wiring.i2c_sda)
-    with pytest.raises(Exception, match=r"pull-up"):
+    with pytest.raises(Exception) as exc:
         benchpod.command({"cmd": "i2c_start", "sda": la(wiring.i2c_sda), "scl": la(wiring.i2c_scl),
                           "pullups": "pod"})
+    assert getattr(exc.value, "code", "") == "BP0061", exc.value  # I2C needs pull-ups
 
 
 def test_la_dir_refuses_push_pull_on_dut_output(benchpod, wiring, node):
@@ -134,8 +135,9 @@ def test_la_dir_refuses_push_pull_on_dut_output(benchpod, wiring, node):
     alarm = la(wiring.alarm)
     try:
         benchpod.command({"cmd": "la_dir", "la": alarm, "dir": "dut_output"})
-        with pytest.raises(Exception, match=r"direction conflict"):
+        with pytest.raises(Exception) as exc:
             benchpod.command({"cmd": "gpio", "la": alarm, "mode": "output", "level": 0})
+        assert getattr(exc.value, "code", "") == "BP0034", exc.value  # la_dir: a DUT output
         benchpod.command({"cmd": "gpio", "la": alarm, "mode": "input"})
         benchpod.command({"cmd": "gpio", "la": alarm, "mode": "off"})
     finally:
@@ -147,12 +149,12 @@ def test_la_dir_refuses_push_pull_on_dut_output(benchpod, wiring, node):
 def capture_with_send(benchpod, send, *, samples, rate_hz, trigger_la, edge="falling"):
     """la_capture with a ``send`` (the SDK has no field for it yet): (words, rate_hz, send result)."""
     from embeddedci.benchpod import capture as cap
-    req = {"cmd": "la_capture", "samples": samples, "sample_rate_mhz": rate_hz / 1e6,
+    req = {"cmd": "la_capture", "samples": samples, "sample_rate_hz": rate_hz,
            "trigger": {"la": trigger_la, "edge": edge, "pre_samples": 64}, "trigger_timeout_ms": 2000, "send": send}
     edges, upto, rate, result = [], 0, rate_hz, None
     for chunk in cap._stream_or_samples(benchpod._transport, req):
-        if chunk.get("la_rate_hz"):
-            rate = float(chunk["la_rate_hz"])
+        if chunk.get("la_sample_rate_hz"):
+            rate = float(chunk["la_sample_rate_hz"])
         if "send" in chunk:
             result = chunk["send"]
         if chunk.get("la"):
@@ -192,10 +194,10 @@ def test_send_and_capture_i2c(i2c_bus, benchpod, node, hz, rate, want):
 
 def test_send_refused_without_session(benchpod, wiring, node):
     require_master(benchpod)
-    # the firmware says i2c_start; the SDK (2.13.13+) rewrites the hint to bp.open_i2c()
-    with pytest.raises(Exception, match=r"no I2C session"):
+    with pytest.raises(Exception) as exc:
         capture_with_send(benchpod, {"bus": "i2c", "addr": TARGET, "read": 1}, samples=1024,
                           rate_hz=12e6, trigger_la=la(wiring.i2c_sda))
+    assert getattr(exc.value, "code", "") == "BP0062", exc.value  # no I2C session open
 
 
 @pytest.fixture
@@ -220,7 +222,7 @@ def free_spi(benchpod, wiring, node):
 @pytest.mark.needs_la6_resistor
 @pytest.mark.parametrize("mode", [0, 1, 2, 3])
 def test_spi_modes_send_and_capture(benchpod, free_spi, mode):
-    r = benchpod.command({"cmd": "spi_start", **free_spi, "hz": 1_000_000, "mode": mode})
+    r = benchpod.command({"cmd": "spi_start", **free_spi, "clock_hz": 1_000_000, "mode": mode})
     assert r["mode"] == mode
     tx = bytes([0x9F, 0x5A, 0xC3, 0x01])
     words, rate, res = capture_with_send(benchpod, {"bus": "spi", "tx": b64(tx)}, samples=4096,

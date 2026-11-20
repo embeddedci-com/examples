@@ -2,7 +2,7 @@
 
 Registers the ``artifacts_only`` marker used to select the device-free build-reporting test
 (``test_report_build``) so it can run on every push without touching a BenchPod. The ``hardware``
-marker itself is registered by the embeddedci pytest plugin (embeddedci>=2.0).
+marker itself is registered by the embeddedci pytest plugin (embeddedci>=4.0).
 
 Also sets the BenchPod LA I/O-bank voltage for the whole session (see ``benchpod_la_voltage``).
 """

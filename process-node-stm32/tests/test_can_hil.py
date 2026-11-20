@@ -84,7 +84,7 @@ def test_pod_to_node(can, node, can_id, data, ext):
 def test_node_to_pod(can, node, line, can_id, data, ext):
     """Node transmits, the pod receives and ACKs (node reports tx ok)."""
     node.cmd(line, r"CAN tx ok")
-    f = can.expect(can_id=can_id, timeout=2.0)
+    f = can.expect(can_id, timeout=2.0)
     assert (f.data, f.ext) == (data, ext), str(f)
 
 
@@ -95,7 +95,7 @@ def test_echo_round_trip(can, node):
     for i in range(5):
         payload = bytes([i, 0xA5, i ^ 0xFF])
         can.write(0x200, payload)
-        reply = can.expect(can_id=0x201, timeout=2.0)
+        reply = can.expect(0x201, timeout=2.0)
         assert reply.data == payload, str(reply)
 
 
@@ -156,7 +156,7 @@ def test_classic_node_on_fd_bus(benchpod, node, data_bitrate):
         bus.write(0x1ABCDE0, bytes(range(8)), ext=True, fd=False)
         node.expect_rx(0x1ABCDE0, bytes(range(8)), ext=True)
         node.cmd("can send 321 11 22 33", r"CAN tx ok")
-        f = bus.expect(can_id=0x321, timeout=2.0)
+        f = bus.expect(0x321, timeout=2.0)
         assert not f.fd and f.data == b"\x11\x22\x33"
         st = bus.status()
         assert st["tec"] == 0 and st["rec"] == 0 and not st["bus_off"], f"pod saw errors: {st}"
@@ -170,7 +170,7 @@ def test_pod_listen_mode_does_not_ack(benchpod, node):
     with benchpod.open_can(bitrate=BITRATE, mode="listen", term=True) as bus:
         node.cmd("can send 123 01", r"CAN tx fail: timeout", timeout=3.0)
         assert int(node.status()["tec"]) > 0
-        f = bus.expect(can_id=0x123, timeout=2.0)  # retransmissions were still seen
+        f = bus.expect(0x123, timeout=2.0)  # retransmissions were still seen
         assert f.data == b"\x01"
 
 
@@ -204,12 +204,12 @@ def test_termination_switch(benchpod, node, on):
         if on or MODULE_TERM:
             node.expect_rx(0x150, bytes([int(on)]))
             node.cmd("can send 151 5A", r"CAN tx ok")
-            assert bus.expect(can_id=0x151, timeout=2.0).data == b"\x5A"
+            assert bus.expect(0x151, timeout=2.0).data == b"\x5A"
             st = bus.status()
             assert st["tec"] == 0 and st["rec"] == 0, f"errors with term={on}: {st}"
         else:
             node.cmd("can send 151 5A", r"CAN tx fail")
-            assert bus.read_until(can_id=0x151, timeout=0.5) is None
+            assert bus.read_until(0x151, timeout=0.5) is None
             # The unACKed frame retransmits until bus-off; the pod then recovers and zeroes TEC,
             # which a slow (cloud) status read can land after.
             st = bus.status()
@@ -229,7 +229,7 @@ def test_bitrates(benchpod, node, bitrate):
         bus.write(0x111, [bitrate >> 16 & 0xFF])
         node.expect_rx(0x111, bytes([bitrate >> 16 & 0xFF]))
         node.cmd("can send 222 5A", r"CAN tx ok")
-        assert bus.expect(can_id=0x222, timeout=2.0).data == b"\x5A"
+        assert bus.expect(0x222, timeout=2.0).data == b"\x5A"
 
 
 @pytest.mark.hardware
@@ -239,4 +239,4 @@ def test_bitrate_mismatch_fails(benchpod, node):
     with benchpod.open_can(bitrate=BITRATE, mode="normal", term=True) as bus:
         node.cmd("can send 333 01", r"CAN tx fail", timeout=3.0)
         assert int(node.status()["txfail"]) >= 1
-        assert bus.read_until(can_id=0x333, timeout=0.5) is None
+        assert bus.read_until(0x333, timeout=0.5) is None

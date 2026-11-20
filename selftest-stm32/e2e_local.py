@@ -12,7 +12,7 @@ Run against a BenchPod on your LAN (TCP, not the cloud). It:
 Seeing ``APP_OK`` after a DAP flash means the pod actually wrote firmware over the
 SWD wire and the target booted it — i.e. the DAP probe is fully working.
 
-Prereqs: embeddedci>=2.0, an OpenOCD with the ``cmsis_dap_tcp`` backend (newer than
+Prereqs: embeddedci>=4.0, an OpenOCD with the ``cmsis_dap_tcp`` backend (newer than
 0.12.0, e.g. xPack OpenOCD), the pod runs the current firmware (DAP + uart proxy) and
 is on the network, and the STM32 is wired (SWCLK/SWDIO + UART + power eFuse on LA
 channels, NRST on the pod's reset pin, DUT header J1 pin 22) per the options below.
