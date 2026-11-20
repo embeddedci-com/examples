@@ -55,7 +55,7 @@ def test_overtemp_reaches_every_output(benchpod, wiring, node, env):
 
         assert benchpod.wait_for_level(wiring.alarm, 1, timeout=ALARM_LATENCY_S), "PB0 never went high"
         _expect_evt(node, "EVT alarm set=overtemp active=0x01")
-        f = bus.expect(can_id=ALARM_CAN_ID, timeout=ALARM_LATENCY_S)
+        f = bus.expect(ALARM_CAN_ID, timeout=ALARM_LATENCY_S)
         temp_dc = int.from_bytes(f.data[2:4], "little", signed=True)
         assert (f.data[0], f.data[1]) == (0x01, 0x01) and abs(temp_dc - 600) <= 2, str(f)
 
@@ -69,7 +69,7 @@ def test_overtemp_reaches_every_output(benchpod, wiring, node, env):
         env.set(temperature_c=47.0)
         assert benchpod.wait_for_level(wiring.alarm, 0, timeout=ALARM_LATENCY_S), "PB0 stayed high"
         _expect_evt(node, "EVT alarm clear=overtemp active=0x00")
-        f = bus.expect(can_id=ALARM_CAN_ID, timeout=ALARM_LATENCY_S)
+        f = bus.expect(ALARM_CAN_ID, timeout=ALARM_LATENCY_S)
         assert (f.data[0], f.data[1]) == (0x00, 0x01), str(f)
 
 
