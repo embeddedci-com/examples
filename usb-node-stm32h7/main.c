@@ -16,6 +16,7 @@
 #include "board.h"
 #include "disk.h"
 #include "loader.h"
+#include "esp_rom.h"
 #include "tusb.h"
 #include "usbnode.h"
 
@@ -30,7 +31,7 @@ static uint32_t s_keep_image __attribute__((section(".noinit"))); /* MODE_MAGIC:
 node_mode_t g_mode;
 
 static const char *const k_mode_names[MODE_COUNT] = {"cdc", "msc", "uf2", "teensy", "optiboot", "atmegaboot",
-                                                      "stk500v2", "leonardo", "caterina", "zero", "samba",
+                                                      "stk500v2", "leonardo", "caterina", "zero", "samba", "esp32s3",
                                                       "many", "big", "huge",
                                                       "badlen", "overlong", "strings", "nostr"};
 const char *mode_name(node_mode_t m) { return m < MODE_COUNT ? k_mode_names[m] : "?"; }
@@ -86,7 +87,8 @@ uint32_t st_cdc_baud(void) { return st.cdc_baud; }
 void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
 {
     (void)itf;
-    if (mode_is_loader(g_mode)) loader_line_state(dtr, st.cdc_dtr, st.cdc_baud);
+    if (g_mode == MODE_ESP32S3) esp_rom_line_state(dtr, rts);
+    else if (mode_is_loader(g_mode)) loader_line_state(dtr, st.cdc_dtr, st.cdc_baud);
     if (st.cdc_dtr && !dtr && st.cdc_baud == 1200 && !mode_is_loader(g_mode)) {
         con_write("EV cdc touch1200\n");
     }
@@ -101,6 +103,10 @@ static void cdc_task(void)
     uint32_t n = tud_cdc_read(buf, sizeof(buf));
     st.cdc_rx += n;
     st.last_usb_ms = millis();
+    if (g_mode == MODE_ESP32S3) {
+        esp_rom_rx(buf, n);
+        return;
+    }
     if (mode_is_loader(g_mode)) {
         loader_rx(buf, n);
         return;
@@ -227,6 +233,15 @@ static void print_status(void)
                    (unsigned long)l->hi, (unsigned long)l->erases, (unsigned long)l->leaves,
                    (unsigned long)l->errors, (unsigned long)l->dropped);
     }
+    if (g_mode == MODE_ESP32S3) {
+        const esp_rom_stats_t *e = esp_rom_stats();
+        con_printf("ESP download %d resets %lu syncs %lu begins %lu blocks %lu resends %lu bad_checksums %lu md5s %lu "
+                   "ends %lu errors %lu ignored %lu\n",
+                   esp_rom_in_download(), (unsigned long)e->resets, (unsigned long)e->syncs,
+                   (unsigned long)e->begins, (unsigned long)e->blocks, (unsigned long)e->resends,
+                   (unsigned long)e->bad_checksums, (unsigned long)e->md5s, (unsigned long)e->ends,
+                   (unsigned long)e->errors, (unsigned long)e->ignored);
+    }
     if (mode_is_cdc(g_mode))
         con_printf("CDC rx %lu baud %lu dtr %d rts %d\n", (unsigned long)st.cdc_rx, (unsigned long)st.cdc_baud,
                    st.cdc_dtr, st.cdc_rts);
@@ -239,7 +254,7 @@ static void print_status(void)
 
 static void help(void)
 {
-    con_write("commands: status | mode cdc|msc|uf2|teensy|optiboot|atmegaboot|stk500v2|leonardo|caterina|zero|samba|many|big|huge|badlen|overlong|strings|nostr | detach | attach | replug [ms] | files | uf2 |\n"
+    con_write("commands: status | mode cdc|msc|uf2|teensy|optiboot|atmegaboot|stk500v2|leonardo|caterina|zero|samba|esp32s3|many|big|huge|badlen|overlong|strings|nostr | detach | attach | replug [ms] | files | uf2 |\n"
               "          teensy [len] | image <addr> <len> | format | dfu | reset | version\n");
 }
 

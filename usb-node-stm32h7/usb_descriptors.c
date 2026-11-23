@@ -48,6 +48,7 @@ uint8_t const *tud_descriptor_device_cb(void)
     case MODE_CATERINA: s_dev.idVendor = 0x2341; s_dev.idProduct = 0x0036; break;   /* Leonardo bootloader */
     case MODE_ZERO: s_dev.idVendor = 0x2341; s_dev.idProduct = 0x804D; break;       /* Zero sketch */
     case MODE_SAMBA: s_dev.idVendor = 0x2341; s_dev.idProduct = 0x004D; break;      /* Zero bootloader */
+    case MODE_ESP32S3: s_dev.idVendor = 0x303A; s_dev.idProduct = 0x1001; break;    /* USB-Serial/JTAG */
     case MODE_MSC: s_dev.idProduct = 0x4002; break;
     case MODE_UF2: s_dev.idProduct = 0x4003; break;
     case MODE_TEENSY: /* HalfKay has no strings */

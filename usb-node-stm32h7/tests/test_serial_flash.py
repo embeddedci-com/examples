@@ -113,3 +113,43 @@ def test_samd_stay_in_loader(host, node, usb_flash):
     time.sleep(0.5)
     assert node.status()["mode"] == "samba"
     assert flash_image(node, 0x2000, len(data)) == zlib.crc32(data)
+
+
+def esp_stats(node):
+    return dict(zip(*[iter(node.cmd("status", r"^ESP (.*)").group(1).split())] * 2))
+
+
+def test_esp32s3_native_usb(host, node, usb_flash):
+    """ESP32-S3 on its USB-Serial/JTAG port: esptool's DTR/RTS reset into download mode, the ROM
+    loader, the chip's MD5 of the region, then a hard reset into the new firmware."""
+    node.set_mode("esp32s3")
+    host.wait_device(vid=0x303A, pid=0x1001)
+    data = random.Random(11).randbytes(200 * 1024 + 300)  # a last block that is not full
+    node.mark()
+    st = usb_flash(data, mode="esp", address=0, timeout=120)
+    assert st["ok"], st
+    assert st["protocol"] == "ESP32-S3"
+    node.wait(r"^EV esp download$", timeout=5)
+    node.wait(r"^EV esp boot$", timeout=5)
+    assert flash_image(node, 0, len(data)) == zlib.crc32(data)
+    e = esp_stats(node)
+    assert (e["blocks"], e["md5s"], e["bad_checksums"]) == (str(st["total"]), "1", "0")
+
+
+def test_esp32s3_app_offset_stay(host, node, usb_flash):
+    node.set_mode("esp32s3")
+    host.wait_device(vid=0x303A, pid=0x1001)
+    data = random.Random(12).randbytes(64 * 1024)
+    st = usb_flash(data, mode="esp", address="0x10000", leave=False, timeout=120)
+    assert st["ok"], st
+    assert flash_image(node, 0x10000, len(data)) == zlib.crc32(data)
+    assert esp_stats(node)["download"] == "1"  # leave=false: still in the ROM loader
+
+
+def test_esp_no_loader(host, node, usb_flash):
+    """A serial port that only echoes: the pod gives up on SYNC instead of hanging."""
+    node.set_mode("cdc")
+    host.wait_device(vid=0xCAFE, pid=0x4001)
+    st = usb_flash(bytes(4096), mode="esp", address=0, timeout=60)
+    assert not st["ok"]
+    assert "answer" in st["result"] or "ROM" in st["result"], st
