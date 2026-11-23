@@ -91,8 +91,4 @@ static usbd_class_driver_t const s_null = {
     .sof = NULL,
 };
 
-usbd_class_driver_t const *usbd_app_driver_get_cb(uint8_t *count)
-{
-    *count = 1;
-    return &s_null;
-}
+usbd_class_driver_t const *null_driver(void) { return &s_null; }

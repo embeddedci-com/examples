@@ -12,6 +12,9 @@
 #include <string.h>
 
 #include "board.h"
+#include "bridge.h"
+#include "loader.h"
+#include "usbnode.h"
 #include "disk.h"
 #include "md5.h"
 #include "tusb.h"
@@ -19,6 +22,7 @@
 #define IMAGE_SIZE (DISK_SECTORS * DISK_SECTOR)
 #define CHIP_MAGIC_REG 0x40001000u
 #define S3_MAGIC 0x00000009u
+#define ESP32_MAGIC 0x00F01D83u /* the original ESP32 (an ESP32 dev kit behind its USB-serial chip) */
 
 #define SLIP_END 0xC0
 #define SLIP_ESC 0xDB
@@ -31,6 +35,7 @@ static bool s_dtr, s_rts;
 static bool s_io0_low_at_release;
 static uint32_t s_begin_off, s_begin_size, s_blocks, s_block_size, s_next_seq;
 static esp_rom_stats_t s_st;
+static uint32_t s_rom_baud = 115200; /* the ROM's UART: after CHANGE_BAUDRATE it follows the new rate */
 
 const esp_rom_stats_t *esp_rom_stats(void) { return &s_st; }
 
@@ -53,14 +58,7 @@ static void send_slip(const uint8_t *p, uint32_t n)
         else out[k++] = p[i];
     }
     out[k++] = SLIP_END;
-    const uint8_t *q = out;
-    while (k) {
-        uint32_t w = tud_cdc_write(q, k);
-        tud_cdc_write_flush();
-        q += w;
-        k -= w;
-        if (k) tud_task();
-    }
+    serial_out(out, k);
 }
 
 /* A response: 0x01, op, size, value, body, then the 4 status bytes of the S3 ROM. */
@@ -92,14 +90,15 @@ static void handle(void)
         for (int i = 0; i < 4; i++) reply(op, 0x20120707, NULL, 0, 0);
         break;
     case 0x0A: /* READ_REG */
-        reply(op, len >= 4 && get32(d) == CHIP_MAGIC_REG ? S3_MAGIC : 0, NULL, 0, 0);
+        reply(op, len >= 4 && get32(d) == CHIP_MAGIC_REG ? (g_mode == MODE_ESP32 ? ESP32_MAGIC : S3_MAGIC) : 0, NULL, 0, 0);
         break;
     case 0x0D: case 0x0B: /* SPI_ATTACH, SPI_SET_PARAMS */
         reply(op, 0, NULL, 0, 0);
         break;
-    case 0x0F: /* CHANGE_BAUDRATE: native USB has no rate */
+    case 0x0F: /* CHANGE_BAUDRATE: answered at the old rate, then the UART switches */
         s_st.baud_changes++;
         reply(op, 0, NULL, 0, 0);
+        if (len >= 4) s_rom_baud = get32(d);
         break;
     case 0x02: { /* FLASH_BEGIN: erase size, blocks, block size, offset [, encrypted] */
         if (len < 16) { reply(op, 0, NULL, 0, 0x05); break; }
@@ -158,6 +157,10 @@ void esp_rom_rx(const uint8_t *p, uint32_t n)
         s_st.ignored += n; /* the sketch does not speak the ROM protocol */
         return;
     }
+    if (g_bridge != BRIDGE_NONE && st_cdc_baud() != s_rom_baud) {
+        s_st.wrong_baud += n; /* behind a USB-serial chip at another rate: garbage to the ROM */
+        return;
+    }
     for (uint32_t i = 0; i < n; i++) {
         uint8_t c = p[i];
         if (c == SLIP_END) {
@@ -179,16 +182,18 @@ void esp_rom_rx(const uint8_t *p, uint32_t n)
     }
 }
 
-/* USB-Serial/JTAG, as esptool drives it: DTR=1 with RTS=0 arms GPIO0 low, DTR=0 with RTS=1 holds
-   the chip in reset, and the reset's release boots it: into download mode when GPIO0 was armed
-   (esptool goes (0,0) (1,0) (1,1) (0,1) (0,0)), else the sketch (a hard reset: (0,1) (0,0)). */
+/* USB-Serial/JTAG and a dev kit's two-transistor circuit behave alike, as esptool drives them: DTR=1
+   with RTS=0 pulls GPIO0 low, DTR=0 with RTS=1 holds the chip in reset (EN low), and leaving that
+   state boots it: into download mode when GPIO0 was low on the way (USB-Serial/JTAG: (0,0) (1,0)
+   (1,1) (0,1) (0,0); a dev kit: (0,1) (1,0) (0,0)), else the sketch (a hard reset: (0,1) (0,0)). */
 void esp_rom_line_state(bool dtr, bool rts)
 {
-    bool was_rts = s_rts;
+    bool was_reset = s_rts && !s_dtr, reset = rts && !dtr;
     if (dtr && !rts) s_io0_low_at_release = true;
-    if (was_rts && !rts && !dtr) {
+    if (was_reset && !reset) {
         s_download = s_io0_low_at_release;
         s_io0_low_at_release = false;
+        s_rom_baud = 115200;
         s_in = false;
         s_n = 0;
         s_st.resets++;

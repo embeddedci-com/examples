@@ -4,6 +4,7 @@
 #include "stm32h7xx.h"
 #include "tusb.h"
 #include "usbnode.h"
+#include "bridge.h"
 
 #define VID_TEST   0xCAFEu /* TinyUSB's test VID: bench use only */
 #define TEENSY_VID 0x16C0u
@@ -49,6 +50,7 @@ uint8_t const *tud_descriptor_device_cb(void)
     case MODE_ZERO: s_dev.idVendor = 0x2341; s_dev.idProduct = 0x804D; break;       /* Zero sketch */
     case MODE_SAMBA: s_dev.idVendor = 0x2341; s_dev.idProduct = 0x004D; break;      /* Zero bootloader */
     case MODE_ESP32S3: s_dev.idVendor = 0x303A; s_dev.idProduct = 0x1001; break;    /* USB-Serial/JTAG */
+    case MODE_ESP32: s_dev.idProduct = 0x4022; break;                              /* use it with a bridge */
     case MODE_MSC: s_dev.idProduct = 0x4002; break;
     case MODE_UF2: s_dev.idProduct = 0x4003; break;
     case MODE_TEENSY: /* HalfKay has no strings */
@@ -60,6 +62,14 @@ uint8_t const *tud_descriptor_device_cb(void)
     default: /* the hostile modes: 0x4010 + mode */
         s_dev.idProduct = (uint16_t)(0x4010 + (g_mode - MODE_MANY));
         break;
+    }
+    if (g_bridge != BRIDGE_NONE && mode_is_cdc(g_mode)) { /* the USB-serial chip in front */
+        s_dev.bDeviceClass = s_dev.bDeviceSubClass = s_dev.bDeviceProtocol = 0;
+        uint16_t vid = 0, pid = 0, bcd = 0;
+        bridge_ids(&vid, &pid, &bcd);
+        s_dev.idVendor = vid;
+        s_dev.idProduct = pid;
+        s_dev.bcdDevice = bcd;
     }
     return (uint8_t const *)&s_dev;
 }
@@ -108,7 +118,7 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
 {
     (void)index;
     if (mode_is_hostile(g_mode)) return hostile_configuration();
-    if (mode_is_cdc(g_mode)) return s_cfg_cdc;
+    if (mode_is_cdc(g_mode)) return g_bridge != BRIDGE_NONE ? bridge_configuration() : s_cfg_cdc;
     switch (g_mode) {
     case MODE_CDC: return s_cfg_cdc;
     case MODE_MSC:

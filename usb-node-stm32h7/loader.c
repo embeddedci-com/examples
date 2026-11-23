@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "board.h"
+#include "bridge.h"
 #include "disk.h"
 #include "tusb.h"
 
@@ -65,16 +66,7 @@ void loader_erase_image(void) { memset(image(), 0xFF, IMAGE_SIZE); }
 
 const loader_stats_t *loader_stats(void) { return &s_st; }
 
-static void send(const uint8_t *p, uint32_t n)
-{
-    while (n) {
-        uint32_t k = tud_cdc_write(p, n);
-        tud_cdc_write_flush();
-        p += k;
-        n -= k;
-        if (n) tud_task();
-    }
-}
+static void send(const uint8_t *p, uint32_t n) { serial_out(p, n); }
 static void send1(uint8_t b) { send(&b, 1); }
 
 static void schedule_reset(node_mode_t to)

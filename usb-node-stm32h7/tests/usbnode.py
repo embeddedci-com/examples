@@ -87,7 +87,13 @@ class UsbNode:
     def set_mode(self, mode: str, timeout: float = 5.0) -> None:
         """Switch the node to ``mode`` (it resets) and wait for its boot."""
         self.cmd(f"mode {mode}", rf"^(OK mode {mode}|ERR)")
-        self.wait(rf"usb-node-stm32h7 \S+ mode {mode}$", timeout)
+        self.wait(rf"usb-node-stm32h7 \S+ mode {mode}( bridge \S+)?$", timeout)
+        self.wait(r"^APP_OK$", timeout)
+
+    def set_bridge(self, kind: str, timeout: float = 5.0) -> None:
+        """Put a USB-serial chip (ftdi, cp210x, ch34x) in front of the serial modes, or none."""
+        self.cmd(f"bridge {kind}", rf"^(OK bridge {kind}|ERR)")
+        self.wait(rf"usb-node-stm32h7 \S+ mode \S+ bridge {kind}$", timeout)
         self.wait(r"^APP_OK$", timeout)
 
     def ensure_mode(self, mode: str) -> None:

@@ -121,7 +121,7 @@ def test_rom_dfu_reflashes_itself(host, node, usb_flash):
     try:
         st = usb_flash(image, mode="dfu", address="0x08000000", timeout=120)
         assert st["ok"], st
-        node.wait(r"usb-node-stm32h7 \S+ mode \w+$", timeout=15)
+        node.wait(r"usb-node-stm32h7 \S+ mode \w+( bridge \S+)?$", timeout=15)
         node.wait(r"^APP_OK$", timeout=5)
     except Exception:
         node.hard_reset()  # out of the ROM bootloader, so the tests after this one have a node

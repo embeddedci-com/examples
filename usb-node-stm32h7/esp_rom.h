@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 typedef struct {
-    uint32_t resets, syncs, begins, blocks, resends, bad_checksums, md5s, ends, baud_changes, errors, ignored;
+    uint32_t resets, syncs, begins, blocks, resends, bad_checksums, md5s, ends, baud_changes, errors, ignored, wrong_baud;
 } esp_rom_stats_t;
 
 void esp_rom_rx(const uint8_t *p, uint32_t n);
