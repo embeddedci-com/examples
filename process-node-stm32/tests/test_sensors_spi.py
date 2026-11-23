@@ -14,7 +14,7 @@ import pytest
 from conftest import local_def, spi_pins
 from embeddedci.benchpod.sensors import load_definition
 
-pytestmark = [pytest.mark.hardware, pytest.mark.sensors_spi, pytest.mark.needs_new_wiring]
+pytestmark = [pytest.mark.hardware, pytest.mark.sensors_spi]
 
 READ = 0x80
 INC = 0x40
