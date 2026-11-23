@@ -162,7 +162,7 @@ With 8 MHz the fastest bitrate is 500 kbit/s; 1 Mbit/s needs a 16 MHz crystal.
 | `can print on\|off` | print received frames (default on) |
 | `can selftest` | loop a frame inside the MCP2515, nothing on the bus |
 | `can regs` | dump MCP2515 registers |
-| `prog_emu <updi\|updi2\|pic\|pic8\|pic18\|c2\|tpi\|pdi>` | answer as that chip for the pod's `prog_flash` (see [Chip emulators](#chip-emulators-prog_emu)); `PROG_EMU ok proto=.. chip=".."` |
+| `prog_emu <updi\|updimega\|updi2\|pic\|pic8\|pic18\|pic18q10\|c2\|c2early\|tpi\|tpi20\|tpi40\|tpi104\|pdi>` | answer as that chip for the pod's `prog_flash` (see [Chip emulators](#chip-emulators-prog_emu)); `PROG_EMU ok proto=.. chip=".."` |
 | `prog_emu stop` / `stat` / `clear` / `lock` / `list` | normal pins back; counters, timing and CRC32 of each memory; zero the counters; lock the chip; the chips |
 | `prog_emu dump <mem> <addr> <len>` | hex of an emulated memory (up to 4096 bytes), 32 bytes a line: `0040:<hex>` |
 
@@ -260,13 +260,18 @@ instead of those, not with them):
 
 | `prog_emu` | Chip (default ID, as the pod reports it) | Memories (`dump`, CRC32) |
 |---|---|---|
-| `pic` | PIC16F1xxx-like, 6-bit commands, device 02A5 rev 2002: `a5020220` | `flash` 8192 B (4096 14-bit words, little endian), `eeprom` 256, `config` 64 (config words and user ID, 16 bits each) |
-| `pic8` | PIC16F18xxx-like, 8-bit commands, device 30B2 rev 2001: `b2300120` | same |
-| `pic18` | PIC18 Q-like, 8-bit commands, byte PC, device 7A31 rev 2003: `317a0320` | `flash` 8192 B (16-bit words), `eeprom` 256, `config` 64 (bytes at 0x200000 and 0x300000, one per 16-bit cell) |
-| `c2` | Silicon Labs C2, device 32 rev 03 derivative 21: `320321` | `flash` 8192 B; the lock byte is its last byte (0x1FFF), so an image that ends in a byte other than FF locks the chip |
-| `tpi` | ATtiny10: `1e9003` | `flash` 1024 B (16-byte sections), `config` 2 (the configuration byte, the lock bits) |
+| `pic` | PIC16F1xxx-like, 6-bit commands, key LSb first with 33 clocks, one ID word with DEV 0A4 and REV 02 packed: `a4000200` | `flash` 8192 B (4096 14-bit words, little endian), `eeprom` 256, `config` 64 (config words and user ID, 16 bits each), `uid` 32 (unused here) |
+| `pic8` | PIC16F18xxx-like, 8-bit commands (key MSb first, 32 clocks), device 30B2 rev 2001: `b2300120` | same |
+| `pic18` | PIC18 Q43/Q84-like: byte PC, Program Data (0xC0/0xE0) writes one word with no row latches, Bulk Erase 0x18 takes a region payload, config bytes, device 7A31 rev 2003: `317a0320` | `flash` 8192 B (16-bit words), `eeprom` 256, `config` 64 (bytes at 0x300000, one per 16-bit cell), `uid` 32 (16-bit words at 0x200000) |
+| `pic18q10` | PIC18 Q10-like: Bulk Erase has no payload (the PC picks the regions), 16-bit config words, TERAB 75 ms, device 7B10 rev 2004: `107b0420` | same layout; `config` holds 16-bit words |
+| `c2` | Silicon Labs C2 (EFM8BB2/UB1-like), device 32 rev 03 derivative 21: `320321`; FPDAT 0xB4 | `flash` 8192 B; the lock byte is its last byte (0x1FFF), so an image that ends in a byte other than FF locks the chip |
+| `c2early` | the same chip, data driven early (see below) | same |
+| `tpi` | ATtiny10: `1e9003`, one word a write | `flash` 1024 B (section erase wipes it all), `config` 2 (the configuration byte, the lock bits) |
+| `tpi20`, `tpi40` | ATtiny20 `1e910f` (2 words a write), ATtiny40 `1e920e` (4 words), IDLE between the words | `flash` 2048 and 4096 B |
+| `tpi104` | ATtiny104-like `1e900b`: also PAGE_ERASE (0x18) | `flash` 1024 B |
 | `pdi` | XMEGA-like, device 1E 94 41: `1e9441` | `flash` 20480 B (128-byte pages), `eeprom` 1024, `user` 128, `config` 8 (fuse bytes 0-6, the lock byte) |
 | `updi` | tinyAVR-like (NVM v0), signature 1E 94 21: `1e9421` | `flash` 16384 B at 0x8000 (64-byte pages), `eeprom` 256, `config` 10 (fuses), `user` 32 |
+| `updimega` | megaAVR 0-like (NVM v0), family string `megaAVR`, signature 1E 94 26: `1e9426` | same, `flash` at 0x4000 (the pod takes the base from the SIB) |
 | `updi2` | AVR DA-like (NVM v2), signature 1E 97 0A: `1e970a` | `flash` 16384 B at 0x800000 (512-byte pages), `eeprom` 512, `config` 16, `user` 32 |
 
 What the pod is told (the node knows no device tables, the pod does not either): `page` is the chip's
@@ -278,6 +283,37 @@ code-protect bit, with `baud` holding the byte address of the config word that c
 | `pic` | `PIC_F_CP_BIT(5) \| PIC_F_HAS_EE` = `0x504` | `0x1000E` | 16 |
 | `pic8` | `PIC_F_SET8 \| PIC_F_CP_BIT(1)` = `0x101` | `0x10016` | 32 |
 | `pic18` | `PIC_F_SET8 \| PIC_F_BYTEPC \| PIC_F_CP_BIT(3)` = `0x303` | `0x300004` | 32 |
+| `pic18q10` | `PIC_F_SET8 \| PIC_F_BYTEPC \| PIC_F_Q10 \| PIC_F_CP_BIT(3)` = `0x313` | `0x300004` | 32 |
+| `tpi20`, `tpi40`, `tpi104` | words per write (2, 4) or `TPI_F_PAGE_ERASE` (8) | 0 | 16 |
+
+**Datasheet behavior.** The models follow the vendors' documents as the pod's fixed protocol code
+(benchpod-firmware #241-#244) reads them, not the first reading: PIC key order and 33 clocks on
+the 6-bit set, the packed ID word, PIC18 Q Program Data and Bulk Erase payloads, TENTH 1 ms on the
+PIC18 Qs; C2 data driven after the rising clock edge, the page erase's 0x00 byte and third status
+(40 ms), the device setup writes (VDD monitor, SFR 0xFF/0xEF/0xA9) counted in `unprepared` when an
+erase or write comes without them; TPI section erase of the whole flash, the group writes with IDLE
+between the words, TPIIR; PDI RESET 0x59 before the key, the enable timing (data high 1 us, 16 idle
+clocks, clock within 100 us), the turn-off when the clock is slower than about 10 kHz (`dropouts`),
+the bus off during a chip erase, READ_NVM before NVM-space reads, the fuse write started by a PDI
+write; UPDI starting disabled (enable pulse, or a BREAK, then SYNC inside its window; `timing_viol`),
+the 10 ms v2 EEPROM byte write (a streamed byte meanwhile is lost: `drops`; an ACKed one is held),
+NVMPROG appearing 2 ms after the key, the megaAVR 0 flash base.
+
+**What the node cannot do exactly.** All of it runs from interrupts at the F446's 16 MHz core:
+- C2 specifies the chip driving C2D within nanoseconds of the rising edge, and the pod's feed reads
+  120 ns or more after it. The interrupt needs about a microsecond, so `c2` can hand the pod the
+  previous bit if the pod samples early; `c2early` puts each bit on the wire during the preceding
+  low phase instead, so a slow interrupt still meets the read (a pod that wrongly samples with the
+  clock low is not caught by `c2early`). Try `c2`; if the IDs are off by a bit, read `missed`/`late`
+  and the high-time minimum in `stat` and use `c2early`.
+- The enable pulse and BREAK of UPDI and PDI's data-high timing are measured with the cycle counter
+  (62.5 ns), PDI's data edge by an extra EXTI line on PB12, so they are only as exact as the
+  interrupt latency (about 1 us).
+- A held UPDI ACK (v2 EEPROM, 10 ms) is a busy wait in the interrupt: the node does nothing else
+  meanwhile.
+- The 1.8 V/3.3 V levels, the 5 V-only parts (ATtiny4/5/9/10/20/40 need 5 V on a real bench) and the
+  bulk-erase supply minimums are the pod's to check; the emulator does not model supply voltage.
+- TPI and PDI clock limits (2 MHz, 10 kHz) other than the PDI turn-off are not checked.
 
 `prog_emu lock` locks the chip the way its own lock works (PIC code protection, the C2 lock byte,
 the AVR lock bits, UPDI's lock); a chip erase unlocks it again. A real chip does the same, so a

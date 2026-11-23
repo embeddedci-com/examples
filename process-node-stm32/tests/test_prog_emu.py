@@ -30,7 +30,7 @@ pytestmark = [pytest.mark.hardware, pytest.mark.prog]
 CLK, DATA, RESET, UPDI_DATA = 13, 14, 5, 7
 
 # PIC flags (prog_pic.h): command set and the code-protect bit
-PIC_F_SET8, PIC_F_BYTEPC, PIC_F_HAS_EE = 1, 2, 4
+PIC_F_SET8, PIC_F_BYTEPC, PIC_F_HAS_EE, PIC_F_Q10 = 1, 2, 4, 0x10
 
 
 def pic_cp(bit):
@@ -40,18 +40,32 @@ def pic_cp(bit):
 # name -> what the console starts, what the pod is told, the image
 CASES = {
     "pic": dict(pins={"proto": "pic", "clk": CLK, "data": DATA, "reset": RESET}, page=16,
-                flags=pic_cp(5) | PIC_F_HAS_EE, baud=0x1000E, size=8192, id="a5020220", w14=True),
+                flags=pic_cp(5) | PIC_F_HAS_EE, baud=0x1000E, size=8192, id="a4000200", w14=True),
     "pic8": dict(pins={"proto": "pic", "clk": CLK, "data": DATA, "reset": RESET}, page=32,
                  flags=PIC_F_SET8 | pic_cp(1), baud=0x10016, size=8192, id="b2300120", w14=True),
     "pic18": dict(pins={"proto": "pic", "clk": CLK, "data": DATA, "reset": RESET}, page=32,
                   flags=PIC_F_SET8 | PIC_F_BYTEPC | pic_cp(3), baud=0x300004, size=8192, id="317a0320"),
+    "pic18q10": dict(pins={"proto": "pic", "clk": CLK, "data": DATA, "reset": RESET}, page=32,
+                     flags=PIC_F_SET8 | PIC_F_BYTEPC | PIC_F_Q10 | pic_cp(3), baud=0x300004, size=8192,
+                     id="107b0420"),
     "c2": dict(pins={"proto": "c2", "clk": CLK, "data": DATA}, page=512, size=8192, id="320321",
                keep_last_ff=True),
+    "c2early": dict(pins={"proto": "c2", "clk": CLK, "data": DATA}, page=512, size=8192, id="320321",
+                    keep_last_ff=True),
     "tpi": dict(pins={"proto": "tpi", "clk": CLK, "data": DATA, "reset": RESET}, page=16, size=1024,
                 id="1e9003"),
+    # flags: words per write (2 = ATtiny20, 4 = ATtiny40), 8 = page erase (ATtiny102/104)
+    "tpi20": dict(pins={"proto": "tpi", "clk": CLK, "data": DATA, "reset": RESET}, page=16, flags=2,
+                  size=2048, id="1e910f"),
+    "tpi40": dict(pins={"proto": "tpi", "clk": CLK, "data": DATA, "reset": RESET}, page=16, flags=4,
+                  size=4096, id="1e920e"),
+    "tpi104": dict(pins={"proto": "tpi", "clk": CLK, "data": DATA, "reset": RESET}, page=16, flags=8,
+                   size=1024, id="1e900b"),
     "pdi": dict(pins={"proto": "pdi", "clk": CLK, "data": DATA}, page=128, size=20480, id="1e9441"),
     "updi": dict(pins={"proto": "updi", "data": UPDI_DATA}, page=64, size=16384, id="1e9421",
                  uart=True),
+    "updimega": dict(pins={"proto": "updi", "data": UPDI_DATA}, page=64, size=16384, id="1e9426",
+                     uart=True),
     "updi2": dict(pins={"proto": "updi", "data": UPDI_DATA}, page=512, size=16384, id="1e970a",
                   uart=True),
 }

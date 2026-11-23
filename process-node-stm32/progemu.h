@@ -55,19 +55,26 @@ typedef struct {
     void      (*edge)(int clk, int pod);
     int       (*drive)(void);          /* what the chip drives on data now: 0, 1, or -1 (released) */
     void      (*nrst)(int low);        /* reset pin changed */
+    void      (*data)(int level);      /* optional: the pod changed data while not driven by the chip (EXTI on PB12) */
     /* UPDI: the host side calls these */
     void      (*rx)(uint8_t b);        /* a byte after SYNC */
     void      (*sync)(void);           /* a SYNC was measured */
     void      (*brk)(void);            /* BREAK */
+    void      (*pulse)(void);          /* a low pulse (the enable pulse) ended */
+    int       (*sync_gate)(void);      /* a frame starts: 1 when the UPDI takes it (enabled, SYNC in its window) */
     int       (*want_sync)(void);      /* 1: the next frame starts with SYNC */
 } pe_chip_t;
 
 /* The chips (each progemu_<proto>.c). */
-extern const pe_chip_t pe_updi, pe_updi2, pe_pic, pe_pic8, pe_pic18, pe_c2, pe_tpi, pe_pdi;
+extern const pe_chip_t pe_updi, pe_updi2, pe_updimega, pe_pic, pe_pic8, pe_pic18, pe_pic18q10, pe_c2, pe_c2early, pe_tpi, pe_tpi20, pe_tpi40, pe_tpi104, pe_pdi;
 
 /* UPDI model: queue bytes the chip sends (progemu.c sends them over USART3, the host harness
    puts them in the pod's receive queue). */
 void pe_updi_tx(const uint8_t *b, unsigned n);
+/* The next reply byte is not sent before this cycle count (an ACK held until a write is done). */
+void pe_updi_hold(uint32_t until);
+/* us after a BREAK's low ends until its frame is over (2 stop bits at 300 baud); the host harness sets it. */
+extern uint32_t pe_break_frame_us;
 
 /* USART3 interrupt hook (uart3.c calls it first): 1 when the UPDI emulator took the interrupt. */
 int  progemu_usart3_irq(void);

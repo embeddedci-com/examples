@@ -5,11 +5,19 @@
  * small NVM controller, so a wrong sequence (no erase first, a byte access to the flash page
  * buffer, no command before a store) shows up as a failed read-back or a counted violation.
  *
+ * Timing per the datasheets: the UPDI starts disabled; a low pulse or a BREAK enables it and the
+ * first SYNC must start 200 us to 14 ms after the pulse (within 5 ms of the BREAK's frame), else the
+ * UPDI disables itself (`timing_viol`); a v2 EEPROM byte takes 10 ms to write, a streamed (no ACK)
+ * byte sent meanwhile is lost (`drops`), an ACKed one is held until the write is done; NVMPROG
+ * shows up 2 ms after the reset release.
+ *
  * The wire side (progemu.c) measures SYNC, takes the bytes after it and sends the replies; this
  * file is the chip behind it.
  *
  *   updi   tinyAVR-like (NVM v0), 16 KB flash at 0x8000 (64-byte pages), 256 B EEPROM,
  *          10 fuse bytes, 32-byte user row; signature 1e 94 21 (id 1e9421)
+ *   updimega  megaAVR 0-like (NVM v0), flash at 0x4000 (the pod picks the base from the SIB family),
+ *          signature 1e 94 26 (id 1e9426)
  *   updi2  AVR DA-like (NVM v2), 16 KB flash at 0x800000 (512-byte pages), 512 B EEPROM,
  *          16 fuse bytes, 32-byte user row; signature 1e 97 0a (id 1e970a)
  */
@@ -49,6 +57,12 @@ typedef struct {
     uint8_t pb[512], pbd[512];
     int pb_reg;
     uint32_t pb_page;
+    /* the UPDI's own timing: disabled until a pulse or a BREAK enables it, then the first SYNC must
+       start inside a window (TDebZ); a v2 EEPROM or fuse byte takes 10 ms to write; NVMPROG shows up
+       a little after the reset release */
+    uint8_t enabled, await, busy_on;
+    uint32_t t_open, t_close, busy_until, prog_at;
+    uint32_t timing_viol, drops, pulses;
     /* counters */
     uint32_t frames, bad_access, bad_frame, breaks, keys, chip_erases, resets;
     uint32_t st_words, st_bytes;
@@ -58,6 +72,21 @@ _Static_assert(sizeof(chip_t) <= PE_POOL_BYTES, "updi state");
 #define C (*(chip_t *)(void *)pe_pool)
 
 static pe_counts_t s_counts;
+
+static int is_busy10(void)
+{
+    return C.busy_on && (int32_t)(C.busy_until - pe_now) > 0;
+}
+
+/* A store while the previous byte is still being written: with ACKs the UPDI holds the byte (and its
+   ACK) until the write is done; streamed without ACKs (RSD) the byte is lost. 1 = dropped. */
+static int store_while_busy(void)
+{
+    if (!is_busy10()) return 0;
+    if (C.cs[2] & 8) { C.drops++; return 1; }
+    pe_updi_hold(C.busy_until);
+    return 0;
+}
 
 static void reply(const uint8_t *b, size_t n) { pe_updi_tx(b, (unsigned)n); }
 static void ack(void) { uint8_t a = 0x40; reply(&a, 1); }
@@ -85,7 +114,9 @@ static uint8_t mrd(uint32_t addr)
         switch (addr - 0x1000)
         {
         case 0: return c->ctrla;
-        case 2: { uint8_t v = c->err; if (c->busy > 0) { v |= 1; c->busy--; } return v; }
+        case 2: { uint8_t v = c->err; if (c->busy > 0) { v |= 1; c->busy--; }
+                  if (is_busy10()) v |= 1;
+                  return v; }
         case 6: return c->nv_data;
         case 8: return (uint8_t)c->nv_addr;
         case 9: return (uint8_t)(c->nv_addr >> 8);
@@ -195,7 +226,7 @@ static void mwr1(uint32_t addr, uint8_t v, int dsz)
     }
     else
     {
-        if (cmd == 0x13) { r->d[off] = v; return; }                                        /* EEERWR */
+        if (cmd == 0x13) { r->d[off] = v; C.busy_on = 1; C.busy_until = pe_now + 10000U * pe_cyc_us; return; }                                        /* EEERWR */
         if (cmd == 0x12) { r->d[off] &= v; return; }                                       /* EEWR */
     }
     c->bad_access++;
@@ -226,7 +257,7 @@ static void stcs(unsigned reg, uint8_t v)
             c->inreset = 0;
             c->resets++;
             if (c->keyerase) unlock_erase();
-            else if (c->keynvm && !c->locked) c->prog = 1;
+            else if (c->keynvm && !c->locked) { c->prog = 1; c->prog_at = pe_now + 2000U * pe_cyc_us; }
             c->keynvm = 0;
             if (!c->prog) c->cs[7] &= ~0x10;
         }
@@ -298,12 +329,14 @@ static void data_done(void)
     c->na = 0;
     if (c->cls == C_STS_DATA)
     {
+        if (store_while_busy()) { c->ps = P_SYNC; return; }
         mwr(c->addr, c->arg, (int)dsz);
         if (!(c->cs[2] & 8)) ack();
         c->ps = P_SYNC;
         return;
     }
     /* ST ptr++ with data */
+    if (store_while_busy()) { c->ptr += dsz; if (--c->units == 0) c->ps = P_SYNC; return; }
     if (dsz == 2) c->st_words++; else c->st_bytes++;
     mwr(c->ptr, c->arg, (int)dsz);
     c->ptr += dsz;
@@ -357,7 +390,7 @@ static void decode_op(void)
     {
         unsigned reg = op & 15;
         uint8_t v = c->cs[reg];
-        if (reg == 0x0B) v = (uint8_t)((c->locked ? 1 : 0) | (c->prog ? 8 : 0));
+        if (reg == 0x0B) v = (uint8_t)((c->locked ? 1 : 0) | ((c->prog && (int32_t)(pe_now - c->prog_at) >= 0) ? 8 : 0));
         reply(&v, 1);
         break;
     }
@@ -398,6 +431,44 @@ static void brk(void)
     c->disabled = 0;
     c->cs[2] = c->cs[3] = 0;
     c->rpt = 0;
+    /* a BREAK enables the UPDI: the SYNC must follow within a few ms of its frame (pe_break_frame_us
+       after the line goes high again: the two stop bits at 300 baud) */
+    c->enabled = 1;
+    c->await = 1;
+    c->t_open = pe_now;
+    c->t_close = pe_now + (pe_break_frame_us + 5000U) * pe_cyc_us;
+}
+
+/* A low pulse (a 0x00 at the link rate) enables a disabled UPDI; the first SYNC may start 200 us to
+   14 ms after it. */
+static void pulse(void)
+{
+    chip_t *c = &C;
+    if (c->enabled) return;
+    c->enabled = 1;
+    c->await = 1;
+    c->pulses++;
+    c->t_open = pe_now + 200U * pe_cyc_us;
+    c->t_close = pe_now + 14000U * pe_cyc_us;
+}
+
+/* A frame starts (the first falling edge of a SYNC): 1 when the UPDI takes it. A SYNC outside the
+   window after the enable disables the UPDI again. */
+static int sync_gate(void)
+{
+    chip_t *c = &C;
+    if (!c->enabled) return 0;
+    if (c->await)
+    {
+        c->await = 0;
+        if ((int32_t)(pe_now - c->t_open) < 0 || (int32_t)(c->t_close - pe_now) < 0)
+        {
+            c->timing_viol++;
+            c->enabled = 0;
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static int want_sync(void) { return C.ps == P_SYNC && !C.disabled; }
@@ -449,24 +520,32 @@ static void chip_init(int nvm)
 }
 
 static void init0(void) { chip_init(0); }
+static void init_mega(void)
+{
+    chip_init(0);
+    memcpy(C.sib, "megaAVR P:0D:0-3", 16);
+    C.r[R_FLASH].base = 0x4000;                         /* megaAVR 0: flash at 0x4000 */
+    C.sig[1] = 0x94; C.sig[2] = 0x26;                   /* ATmega1608 */
+}
 static void init2(void) { chip_init(2); }
 static void do_lock(void) { C.locked = 1; }
 
 static const pe_counts_t *counts(void)
 {
     s_counts.frames = C.frames;
-    s_counts.errors = C.bad_access + C.bad_frame;
-    s_counts.timing = 0;
+    s_counts.errors = C.bad_access + C.bad_frame + C.timing_viol + C.drops;
+    s_counts.timing = C.timing_viol;
     return &s_counts;
 }
 
 static void stat(void)
 {
     printf("PROG_EMU updi nvm=%d frames=%lu bad_frame=%lu bad_access=%lu breaks=%lu keys=%lu "
-           "chip_erases=%lu resets=%lu st_words=%lu st_bytes=%lu locked=%u prog=%u\r\n",
+           "chip_erases=%lu resets=%lu st_words=%lu st_bytes=%lu pulses=%lu timing_viol=%lu drops=%lu locked=%u prog=%u\r\n",
            C.nvm, (unsigned long)C.frames, (unsigned long)C.bad_frame, (unsigned long)C.bad_access,
            (unsigned long)C.breaks, (unsigned long)C.keys, (unsigned long)C.chip_erases,
-           (unsigned long)C.resets, (unsigned long)C.st_words, (unsigned long)C.st_bytes, C.locked, C.prog);
+           (unsigned long)C.resets, (unsigned long)C.st_words, (unsigned long)C.st_bytes,
+           (unsigned long)C.pulses, (unsigned long)C.timing_viol, (unsigned long)C.drops, C.locked, C.prog);
 }
 
 static void rd_flash(uint32_t a, uint8_t *b, uint32_t n)
@@ -496,7 +575,8 @@ static const pe_mem_t k_mem2[] = {
 #define UPDI_CHIP(sym, nm, descr, ini, mems) \
     const pe_chip_t sym = { .name = nm, .what = descr, .uart = 1, .reset = 0, .init = ini, .lock = do_lock, \
         .stat = stat, .counts = counts, .mem = mems, .nmem = 4, .rx = rx, .sync = sync, .brk = brk, \
-        .want_sync = want_sync }
+        .pulse = pulse, .sync_gate = sync_gate, .want_sync = want_sync }
 
 UPDI_CHIP(pe_updi, "updi", "tinyAVR-like UPDI (NVM v0): 16 KB flash at 0x8000, 64-byte pages, id 1e9421", init0, k_mem0);
 UPDI_CHIP(pe_updi2, "updi2", "AVR DA-like UPDI (NVM v2): 16 KB flash at 0x800000, 512-byte pages, id 1e970a", init2, k_mem2);
+UPDI_CHIP(pe_updimega, "updimega", "megaAVR 0-like UPDI (NVM v0): flash at 0x4000, family string megaAVR, id 1e9426", init_mega, k_mem0);

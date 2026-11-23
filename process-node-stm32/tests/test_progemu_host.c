@@ -24,6 +24,7 @@
 uint32_t pe_now;
 uint32_t pe_cyc_us = 16U;
 uint32_t pe_pool[PE_POOL_BYTES / 4U];
+uint32_t pe_break_frame_us = 40000U;   /* the sim's write is instant: the BREAK frame ends 40 ms after the call */
 
 
 static int failures, checks;
@@ -34,6 +35,12 @@ static int failures, checks;
 static const pe_chip_t *g_chip;
 static prog_sim_t *g_sim;
 static uint32_t g_edges;
+static int g_prev_clk = 1;
+
+void pe_updi_hold(uint32_t until)
+{
+    if ((int32_t)(until - pe_now) > 0) pe_now = until;
+}
 
 void pe_updi_tx(const uint8_t *b, unsigned n)
 {
@@ -45,6 +52,12 @@ static void a_on_pins(prog_sim_t *s, int clk, int pod)
     (void)s;
     if (g_chip == NULL) return;
     pe_now += 5;
+    if (clk == g_prev_clk)
+    {
+        if (g_chip->data != NULL && pod >= 0) g_chip->data(pod);   /* a data change between clock edges */
+        return;
+    }
+    g_prev_clk = clk;
     g_edges++;
     g_chip->edge(clk, pod);
 }
@@ -77,12 +90,29 @@ static void a_uart_rx(prog_sim_t *s, const uint8_t *b, size_t n, uint32_t baud, 
     {
         if (baud == 300U)
         {
-            if (b[i] == 0) g_chip->brk();
+            if (b[i] == 0)
+            {
+                /* the line goes high again after 10 bits; the model adds the stop bits itself */
+                uint32_t save = pe_now;
+                pe_now += 10U * 1000000U / 300U * pe_cyc_us;
+                g_chip->brk();
+                pe_now = save;
+            }
             continue;
         }
         if (g_chip->want_sync())
         {
-            if (b[i] == 0x55) g_chip->sync();
+            if (b[i] == 0x55)
+            {
+                if (g_chip->sync_gate()) g_chip->sync();
+            }
+            else if (b[i] == 0)
+            {
+                uint32_t save = pe_now;                 /* the pulse ends after its 12 bits */
+                pe_now += 12U * 1000000U / baud * pe_cyc_us;
+                g_chip->pulse();
+                pe_now = save;
+            }
             continue;
         }
         g_chip->rx(b[i]);
@@ -161,6 +191,7 @@ static rig_t *rig_new(const tcase_t *tc)
     g_chip = tc->chip;
     g_sim = &r->sim;
     g_edges = 0;
+    g_prev_clk = 1;
     tc->chip->init();
     prog_sim_init(&r->sim, &r->ops, &k_model, NULL);
     r->ctx.w = &r->ops;
@@ -302,17 +333,23 @@ int main(void)
         { "pic",   &pe_pic,   &prog_proto_pic, 16, PIC_F_CP_BIT(5) | PIC_F_HAS_EE, 0x1000E, 8192, 1, 0 },
         { "pic8",  &pe_pic8,  &prog_proto_pic, 32, PIC_F_SET8 | PIC_F_CP_BIT(1), 0x10016, 8192, 1, 0 },
         { "pic18", &pe_pic18, &prog_proto_pic, 32, PIC_F_SET8 | PIC_F_BYTEPC | PIC_F_CP_BIT(3), 0x300004, 8192, 0, 0 },
+        { "pic18q10", &pe_pic18q10, &prog_proto_pic, 32, PIC_F_SET8 | PIC_F_BYTEPC | PIC_F_Q10 | PIC_F_CP_BIT(3), 0x300004, 8192, 0, 0 },
 #ifdef PE_HAVE_c2
         { "c2",    &pe_c2,    &prog_proto_c2, 512, 0, 0, 8192, 0, 1 },
+        { "c2early", &pe_c2early, &prog_proto_c2, 512, 0, 0, 8192, 0, 1 },
 #endif
 #ifdef PE_HAVE_tpi
         { "tpi",   &pe_tpi,   &prog_proto_tpi, 16, 0, 0, 1024, 0, 0 },
+        { "tpi20", &pe_tpi20, &prog_proto_tpi, 16, 2, 0, 2048, 0, 0 },
+        { "tpi40", &pe_tpi40, &prog_proto_tpi, 16, 4, 0, 4096, 0, 0 },
+        { "tpi104", &pe_tpi104, &prog_proto_tpi, 16, 8, 0, 1024, 0, 0 },
 #endif
 #ifdef PE_HAVE_pdi
         { "pdi",   &pe_pdi,   &prog_proto_pdi, 128, 0, 0, 20480, 0, 0 },
 #endif
 #ifdef PE_HAVE_updi
         { "updi",  &pe_updi,  &prog_proto_updi, 64, 0, 0, 16384, 0, 0 },
+        { "updimega", &pe_updimega, &prog_proto_updi, 64, 0, 0, 16384, 0, 0 },
         { "updi2", &pe_updi2, &prog_proto_updi, 512, 0, 0, 16384, 0, 0 },
 #endif
     };

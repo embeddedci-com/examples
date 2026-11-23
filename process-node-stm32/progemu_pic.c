@@ -5,10 +5,13 @@
  * spec's waits (entry hold, program and erase time, the delay between commands) against the
  * cycle counter.
  *
- * Three chips, one engine:
- *   pic    PIC16F1xxx-like: 6-bit commands, 14-bit words, device 0x2A5 rev 0x2002 (id a5 02 02 20)
+ * Four chips, one engine:
+ *   pic    PIC16F1xxx-like: 6-bit commands, key LSb first with 33 clocks, 14-bit words, DEV 0xA4 and REV 2
+ *          packed in one ID word (id a4 00 02 00)
  *   pic8   PIC16F18xxx-like: 8-bit commands, 14-bit words, device 0x30B2 rev 0x2001 (b2 30 01 20)
- *   pic18  PIC18 Q-like: 8-bit commands, byte PC, 16-bit words, device 0x7A31 rev 0x2003
+ *   pic18  PIC18 Q43/Q84-like: 8-bit commands, byte PC, Program Data with a payload (no row latches),
+ *          Bulk Erase with a region payload, config bytes, device 0x7A31 rev 0x2003
+ *   pic18q10  PIC18 Q10-like: Bulk Erase picked by the PC, 16-bit config words, device 0x7B10 rev 0x2004
  * Flash is 4096 words (8 KB), EEPROM 256 bytes, config and user ID words in "config".
  */
 #include <stdio.h>
@@ -21,7 +24,7 @@
 #define EESZ 256u
 #define NCFG 32u
 
-enum { K_A, K_B16, K_B18 };
+enum { K_A, K_B16, K_B18, K_Q10 };
 enum { CELL_FL, CELL_CFG, CELL_EE, CELL_RO };
 enum { S_CMD, S_PW, S_PR };
 
@@ -32,7 +35,9 @@ typedef struct {
     unsigned rw;
     uint32_t cp_pc;
     int cp_bit;
-    uint16_t fl[NW], cfgw[NCFG], ee[EESZ], rev, dev;
+    uint16_t fl[NW], cfgw[NCFG], uid[16], ee[EESZ], rev, dev, idw, rsv;
+    uint8_t key_lsb;               /* set A: key LSb first, 33 clocks */
+    uint32_t tpint, bulk_need, bulk_mask;   /* PIC18 Q: TPINT and TERAB in us, OR of bulk payloads */
     uint16_t lat[64];
     uint8_t latv[64];
     uint16_t lat1;
@@ -82,15 +87,30 @@ static uint16_t *cell(uint32_t pc, int data_sp, uint16_t *mask, int *kind)
             *kind = CELL_FL; return &c->fl[pc];
         }
         pc -= 0x8000;
+        if (c->kind == K_A)      /* DEV<8:0> and REV<4:0> in one word at 0x8006; 0x8005 reserved */
+        {
+            if (pc == 5) { *kind = CELL_RO; return &c->rsv; }
+            if (pc == 6) { *kind = CELL_RO; return &c->idw; }
+        }
         if (pc == 5) { *kind = CELL_RO; return &c->rev; }
         if (pc == 6) { *kind = CELL_RO; return &c->dev; }
         return pc < NCFG ? &c->cfgw[pc] : NULL;
     }
     if (pc < 2 * NW) { *kind = CELL_FL; return &c->fl[pc / 2]; }
+    *mask = 0xFFFF;
+    if (pc >= 0x200000 && pc < 0x200020 && !(pc & 1)) return &c->uid[(pc - 0x200000) / 2];
+    if (c->kind == K_Q10)
+    {
+        if (pc >= 0x300000 && pc < 0x300020 && !(pc & 1)) return &c->cfgw[16 + (pc - 0x300000) / 2];
+    }
+    else if (pc >= 0x300000 && pc < 0x300010)
+    {
+        *mask = 0xFF;
+        return &c->cfgw[16 + pc - 0x300000];
+    }
+    uint32_t eeb = c->kind == K_Q10 ? 0x310000u : 0x380000u;
     *mask = 0xFF;
-    if (pc >= 0x200000 && pc < 0x200008) return &c->cfgw[pc - 0x200000];
-    if (pc >= 0x300000 && pc < 0x300010) return &c->cfgw[16 + pc - 0x300000];
-    if (pc >= 0x380000 && pc < 0x380000 + EESZ) { *kind = CELL_EE; return &c->ee[pc - 0x380000]; }
+    if (pc >= eeb && pc < eeb + EESZ) { *kind = CELL_EE; return &c->ee[pc - eeb]; }
     *mask = 0xFFFF;
     if (pc == 0x3FFFFC) { *kind = CELL_RO; return &c->rev; }
     if (pc == 0x3FFFFE) { *kind = CELL_RO; return &c->dev; }
@@ -118,7 +138,8 @@ static void erase_all(int cfg, int ee)
     for (unsigned i = 0; i < NW; i++) c->fl[i] = c->mask;
     if (cfg)
     {
-        for (unsigned i = 0; i < NCFG; i++) c->cfgw[i] = c->byt ? 0xFF : 0x3FFF;
+        for (unsigned i = 0; i < NCFG; i++) c->cfgw[i] = !c->byt ? 0x3FFF : c->kind == K_Q10 ? 0xFFFF : 0xFF;
+        if (c->byt) for (unsigned i = 0; i < 16; i++) c->uid[i] = 0xFFFF;
     }
     if (ee) for (unsigned i = 0; i < EESZ; i++) c->ee[i] = 0xFF;
 }
@@ -191,12 +212,49 @@ static uint32_t rd(int dsp, int inc)
     return v;
 }
 
-static void bulk_erase(void)
+/* PIC18 Q Program Data: the word is written at once, TPINT (TPDFM for EEPROM and Q43/Q84 config bytes) */
+static void qprog(uint32_t d, int inc)
+{
+    chip_t *c = &C;
+    uint16_t m; int k;
+    uint16_t *p = cell(c->pc, 0, &m, &k);
+    c->programs++;
+    if (p && k == CELL_FL) { if (!locked()) *p &= (uint16_t)((d & m) | ~m); }
+    else if (p && k != CELL_RO) *p &= (uint16_t)((d & m) | ~m);
+    c->busy_us = (p && (k == CELL_EE || (k == CELL_CFG && m == 0xFF))) ? 11000 : c->tpint;
+    if (inc) c->pc += step(c->pc, 0);
+}
+
+static void bulk_erase(uint32_t d)
 {
     chip_t *c = &C;
     c->bulk++;
-    uint32_t base = c->byt ? 0x300000u : 0x8000u;
-    if (c->pc == base) erase_all(1, 1); else erase_all(0, 0);
+    if (c->kind == K_B18)                   /* payload: bit 0 EEPROM, 1 flash, 2 user ID, 3 config */
+    {
+        c->bulk_mask |= d;
+        if (d & 2) for (unsigned i = 0; i < NW; i++) c->fl[i] = 0xFFFF;
+        if (d & 4) for (unsigned i = 0; i < 16; i++) c->uid[i] = 0xFFFF;
+        if (d & 8) for (unsigned i = 16; i < NCFG; i++) c->cfgw[i] = 0xFF;
+        if (d & 1) for (unsigned i = 0; i < EESZ; i++) c->ee[i] = 0xFF;
+        c->busy_us = c->bulk_need;
+        return;
+    }
+    if (c->kind == K_Q10)                   /* no payload: the PC picks the regions */
+    {
+        if (c->pc >= 0x300000 && c->pc < 0x300100)
+        {
+            for (unsigned i = 0; i < NW; i++) c->fl[i] = 0xFFFF;
+            for (unsigned i = 0; i < 16; i++) c->uid[i] = 0xFFFF;
+            for (unsigned i = 16; i < NCFG; i++) c->cfgw[i] = 0xFFFF;
+        }
+        else if (c->pc >= 0x310000 && c->pc < 0x310400)
+        {
+            for (unsigned i = 0; i < EESZ; i++) c->ee[i] = 0xFF;
+        }
+        c->busy_us = c->bulk_need;
+        return;
+    }
+    if (c->pc == 0x8000u) erase_all(1, 1); else erase_all(0, 0);
     c->busy_us = 5000;
 }
 
@@ -214,7 +272,7 @@ static void exec(uint32_t d)
         case 0x06: c->pc++; break;
         case 0x16: c->pc = 0; break;
         case 0x08: do_program(); break;
-        case 0x09: bulk_erase(); break;
+        case 0x09: bulk_erase(0); break;
         case 0x0B: for (unsigned i = 0; i < EESZ; i++) c->ee[i] = 0xFF; c->bulk++; c->busy_us = 5000; break;
         case 0x11: row_erase(); break;
         default: c->bad_cmds++;
@@ -225,11 +283,15 @@ static void exec(uint32_t d)
         switch (c->cmd)
         {
         case 0x80: c->pc = d; break;
-        case 0x00: load(d, 0, 0); break;
-        case 0x02: load(d, 1, 0); break;
+        case 0x00: if (c->byt) c->bad_cmds++; else load(d, 0, 0); break;
+        case 0x02: if (c->byt) c->bad_cmds++; else load(d, 1, 0); break;
         case 0xF8: c->pc += step(c->pc, 0); break;
-        case 0xE0: do_program(); break;
-        case 0x18: bulk_erase(); break;
+        case 0xC0: case 0xE0:
+            if (c->byt) qprog(d, c->cmd == 0xE0);
+            else if (c->cmd == 0xE0) do_program();
+            else c->bad_cmds++;
+            break;
+        case 0x18: bulk_erase(d); break;
         case 0xF0: row_erase(); break;
         default: c->bad_cmds++;
         }
@@ -242,7 +304,12 @@ static void cmd_done(void)
     int w, r;
     c->cmds++;
     if (!c->set8) { w = c->cmd == 0x00 || c->cmd == 0x02 || c->cmd == 0x03; r = c->cmd == 0x04 || c->cmd == 0x05; }
-    else          { w = c->cmd == 0x80 || c->cmd == 0x00 || c->cmd == 0x02; r = c->cmd == 0xFC || c->cmd == 0xFE; }
+    else
+    {
+        w = c->cmd == 0x80 || (!c->byt && (c->cmd == 0x00 || c->cmd == 0x02))
+            || (c->byt && (c->cmd == 0xC0 || c->cmd == 0xE0)) || (c->kind == K_B18 && c->cmd == 0x18);
+        r = c->cmd == 0xFC || c->cmd == 0xFE;
+    }
     c->k = 0; c->sh = 0;
     if (w) { c->st = S_PW; return; }
     if (r)
@@ -282,7 +349,7 @@ static void rise(void)
     {
         if (c->st == S_CMD && c->k == 0 && c->sh == 0)
         {
-            if (c->first_cmd && idle_cyc() < 250U * us) c->timing_err++;     /* TENTH */
+            if (c->first_cmd && idle_cyc() < (c->byt ? 1000U : 250U) * us) c->timing_err++;     /* TENTH */
             if (idle_cyc() < c->busy_us * us) c->timing_err++;              /* program / erase time */
             if (idle_cyc() < us) c->timing_err++;                            /* TDLY after a command */
             c->first_cmd = 0; c->busy_us = 0;
@@ -300,8 +367,11 @@ static void fall(int bit)
     c->ts = pe_now;
     if (!c->prog)
     {
-        c->keyreg = (c->keyreg << 1) | (uint32_t)bit;
-        if (++c->nkey == 32)
+        if (c->nkey < 32)
+        {
+            if (c->key_lsb) c->keyreg |= (uint32_t)bit << c->nkey; else c->keyreg = (c->keyreg << 1) | (uint32_t)bit;
+        }
+        if (++c->nkey == (c->key_lsb ? 33 : 32))
         {
             if (c->keyreg == KEY) { c->prog = 1; c->first_cmd = 1; c->entries++; }
             else c->bad_key++;
@@ -347,7 +417,10 @@ static void chip_init(int kind)
     memset(c, 0, sizeof *c);
     c->kind = kind;
     c->set8 = kind != K_A;
-    c->byt = kind == K_B18;
+    c->byt = kind >= K_B18;
+    c->key_lsb = kind == K_A;
+    c->tpint = kind == K_Q10 ? 65 : 75;
+    c->bulk_need = kind == K_Q10 ? 75000 : 11000;
     c->mask = c->byt ? 0xFFFF : 0x3FFF;
     c->clen = c->set8 ? 8 : 6;
     c->plen = c->set8 ? 24 : 16;
@@ -355,8 +428,9 @@ static void chip_init(int kind)
     c->prev_clk = 1;
     c->out = -1;
     erase_all(1, 1);
-    if (kind == K_A)   { c->dev = 0x2A5;  c->rev = 0x2002; c->cp_pc = 0x8007;   c->cp_bit = 5; }
+    if (kind == K_A)   { c->dev = 0xA4; c->rev = 0x02; c->idw = (uint16_t)(c->dev << 5 | c->rev); c->cp_pc = 0x8007; c->cp_bit = 5; }
     if (kind == K_B16) { c->dev = 0x30B2; c->rev = 0x2001; c->cp_pc = 0x800B;   c->cp_bit = 1; }
+    if (kind == K_Q10) { c->dev = 0x7B10; c->rev = 0x2004; c->cp_pc = 0x300004; c->cp_bit = 3; }
     if (kind == K_B18) { c->dev = 0x7A31; c->rev = 0x2003; c->cp_pc = 0x300004; c->cp_bit = 3; }
     memset(&s_counts, 0, sizeof s_counts);
 }
@@ -364,6 +438,7 @@ static void chip_init(int kind)
 static void init_a(void)   { chip_init(K_A); }
 static void init_b16(void) { chip_init(K_B16); }
 static void init_b18(void) { chip_init(K_B18); }
+static void init_q10(void) { chip_init(K_Q10); }
 
 static void do_lock(void)
 {
@@ -415,10 +490,21 @@ static void rd_cfg(uint32_t a, uint8_t *b, uint32_t n)
     }
 }
 
+static void rd_uid(uint32_t a, uint8_t *b, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++)
+    {
+        uint32_t o = a + i;
+        uint16_t w = o / 2 < 16U ? C.uid[o / 2] : 0xFFFF;
+        b[i] = (uint8_t)((o & 1U) ? w >> 8 : w);
+    }
+}
+
 static const pe_mem_t k_mem[] = {
     { "flash",  NW * 2U, rd_flash },
     { "eeprom", EESZ,    rd_ee },
     { "config", NCFG * 2U, rd_cfg },
+    { "uid", 32U, rd_uid },
 };
 
 #define PIC_CHIP(sym, nm, descr, ini) \
@@ -426,6 +512,7 @@ static const pe_mem_t k_mem[] = {
         .lock = do_lock, .stat = stat, .counts = counts, .mem = k_mem, \
         .nmem = sizeof k_mem / sizeof k_mem[0], .edge = edge, .drive = drive, .nrst = on_nrst }
 
-PIC_CHIP(pe_pic, "pic", "PIC16F1xxx-like, 6-bit commands, id a5020220 (device 02a5 rev 2002)", init_a);
+PIC_CHIP(pe_pic, "pic", "PIC16F1xxx-like, 6-bit commands, key LSb first, id a4000200 (DEV 0a4 REV 02 in one word)", init_a);
 PIC_CHIP(pe_pic8, "pic8", "PIC16F18xxx-like, 8-bit commands, id b2300120 (device 30b2 rev 2001)", init_b16);
-PIC_CHIP(pe_pic18, "pic18", "PIC18 Q-like, 8-bit commands, byte PC, id 317a0320 (device 7a31 rev 2003)", init_b18);
+PIC_CHIP(pe_pic18, "pic18", "PIC18 Q43/Q84-like, 8-bit commands, byte PC, Program Data, id 317a0320", init_b18);
+PIC_CHIP(pe_pic18q10, "pic18q10", "PIC18 Q10-like, Bulk Erase by PC, 16-bit config words, id 107b0420", init_q10);

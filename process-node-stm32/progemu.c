@@ -30,12 +30,13 @@
 
 uint32_t pe_now;
 uint32_t pe_cyc_us = 16U;
+uint32_t pe_break_frame_us = 6667U;
 uint32_t pe_pool[PE_POOL_BYTES / 4U];
 
 /* ---------------------------------------------------------------- the chips */
 
 static const pe_chip_t *const k_chips[] = {
-    &pe_pic, &pe_pic8, &pe_pic18, &pe_c2, &pe_tpi, &pe_pdi, &pe_updi, &pe_updi2,
+    &pe_pic, &pe_pic8, &pe_pic18, &pe_pic18q10, &pe_c2, &pe_c2early, &pe_tpi, &pe_tpi20, &pe_tpi40, &pe_tpi104, &pe_pdi, &pe_updi, &pe_updi2, &pe_updimega,
 };
 #define NCHIPS (sizeof k_chips / sizeof k_chips[0])
 
@@ -45,6 +46,7 @@ static const pe_chip_t *volatile s_chip;   /* NULL: stopped */
 
 #define CLK_LINE   (1UL << 14)    /* PB14 */
 #define RST_LINE   (1UL << 0)     /* PB0 */
+#define DATA_LINE  (1UL << 12)    /* PB12, PDI: the pod forcing data high arms the enable timing */
 #define UPDI_LINE  (1UL << 10)    /* PC10 */
 
 static volatile int s_drv = -1;   /* what PB12 is driven to: 0, 1, or -1 released */
@@ -122,6 +124,15 @@ static uint32_t s_fall_t;
 static uint32_t s_sync_n, s_bad_sync, s_breaks, s_u_fe, s_u_pe, s_u_ne, s_u_ore, s_u_rx, s_u_tx,
                 s_tx_over, s_sync_last, s_sync_min, s_sync_max, s_brr_last;
 
+static uint32_t s_hold;
+static uint8_t s_holdv;
+
+void pe_updi_hold(uint32_t until)
+{
+    s_hold = until;
+    s_holdv = 1U;
+}
+
 void pe_updi_tx(const uint8_t *b, unsigned n)
 {
     for (unsigned i = 0; i < n; i++)
@@ -164,7 +175,13 @@ static void updi_next(uint32_t t_rx)
     {
         /* answer two bit times after the request ended (we are mid first stop bit now): the pod's
            receiver is done with its own second stop bit by then */
-        while (DWT->CYCCNT - t_rx < 2U * s_bit_cyc)
+        uint32_t target = t_rx + 2U * s_bit_cyc;
+        if (s_holdv)
+        {
+            if ((int32_t)(s_hold - target) > 0) target = s_hold;   /* an ACK held until a write is done */
+            s_holdv = 0U;
+        }
+        while ((int32_t)(DWT->CYCCNT - target) < 0)
         {
         }
         USART3->CR1 = (USART3->CR1 & ~USART_CR1_RE) | USART_CR1_TXEIE;
@@ -186,6 +203,15 @@ static void updi_edge(uint32_t t, int lvl)
     const pe_chip_t *c = s_chip;
     if (!lvl)
     {
+        if (s_nf == 0U)
+        {
+            pe_now = t;
+            if (!c->sync_gate())          /* disabled, or a SYNC outside its window: not taken */
+            {
+                s_fall_t = t;
+                return;
+            }
+        }
         if (s_nf >= 2U)
         {
             uint32_t ref = s_ft[1] - s_ft[0], d = t - s_ft[s_nf - 1U];
@@ -232,6 +258,12 @@ static void updi_edge(uint32_t t, int lvl)
     }
     if (!s_pend)
     {
+        if (low >= 20U * pe_cyc_us && s_nf <= 1U)    /* too long for a SYNC bit: the enable pulse */
+        {
+            s_nf = 0U;
+            pe_now = t;
+            c->pulse();
+        }
         return;
     }
     s_pend = 0U;
@@ -337,6 +369,7 @@ static void updi_start(void)
     s_txh = s_txt = 0U;
     s_sync_n = s_bad_sync = s_breaks = s_u_fe = s_u_pe = s_u_ne = s_u_ore = s_u_rx = s_u_tx = 0U;
     s_tx_over = s_sync_last = s_sync_max = s_brr_last = 0U;
+    s_holdv = 0U;
     s_sync_min = 0xFFFFFFFFU;
     uint32_t pclk = HAL_RCC_GetPCLK1Freq();
     s_apb_div = SystemCoreClock / pclk;
@@ -375,7 +408,7 @@ void EXTI15_10_IRQHandler(void)
 {
     uint32_t t = DWT->CYCCNT;
     uint32_t idr = GPIOB->IDR;
-    uint32_t pr = EXTI->PR & (CLK_LINE | UPDI_LINE);
+    uint32_t pr = EXTI->PR & (CLK_LINE | UPDI_LINE | DATA_LINE);
     EXTI->PR = pr;
     const pe_chip_t *c = s_chip;
     if (c == NULL)
@@ -411,6 +444,11 @@ void EXTI15_10_IRQHandler(void)
         {
             s_late++;          /* the next edge came while this one was handled */
         }
+    }
+    if ((pr & DATA_LINE) && c->data != NULL && s_drv < 0)
+    {
+        pe_now = t;
+        c->data((int)((idr >> 12) & 1U));
     }
     if (pr & UPDI_LINE)
     {
@@ -455,6 +493,14 @@ static void wires_start(const pe_chip_t *c)
     SYSCFG->EXTICR[3] = (SYSCFG->EXTICR[3] & ~(0xFUL << 8)) | (1UL << 8);    /* EXTI14: port B */
     EXTI->RTSR |= CLK_LINE;
     EXTI->FTSR |= CLK_LINE;
+    if (c->data != NULL)
+    {
+        SYSCFG->EXTICR[3] = (SYSCFG->EXTICR[3] & ~0xFUL) | 1UL;               /* EXTI12: port B */
+        EXTI->RTSR |= DATA_LINE;
+        EXTI->FTSR |= DATA_LINE;
+        EXTI->PR = DATA_LINE;
+        EXTI->IMR |= DATA_LINE;
+    }
     s_prev_clk = (int)((GPIOB->IDR >> 14) & 1U);
     EXTI->PR = CLK_LINE;
     EXTI->IMR |= CLK_LINE;
@@ -482,8 +528,8 @@ static void wires_start(const pe_chip_t *c)
 
 static void wires_stop(void)
 {
-    EXTI->IMR &= ~(CLK_LINE | RST_LINE);
-    EXTI->PR = CLK_LINE | RST_LINE;
+    EXTI->IMR &= ~(CLK_LINE | RST_LINE | DATA_LINE);
+    EXTI->PR = CLK_LINE | RST_LINE | DATA_LINE;
     drive_data(-1);
     /* the node's own pins again: SPI2 (PB12 CS high, PB14 MISO) and the alarm output PB0 (its
        level was kept in ODR all along) */
@@ -703,7 +749,7 @@ static void clear_counters(void)
 
 void progemu_help(void)
 {
-    printf("  prog_emu <updi|updi2|pic|pic8|pic18|c2|tpi|pdi>   the NUCLEO answers as that chip (see README)\r\n");
+    printf("  prog_emu <updi|updi2|updimega|pic|pic8|pic18|pic18q10|c2|c2early|tpi|tpi20|tpi40|tpi104|pdi>   the NUCLEO answers as that chip (see README)\r\n");
     printf("  prog_emu stop | stat | clear | lock | dump <mem> <addr> <len> | list\r\n");
 }
 
