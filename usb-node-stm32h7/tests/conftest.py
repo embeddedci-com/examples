@@ -45,6 +45,7 @@ class Host:
 
     def __init__(self, bp):
         self.bp = bp
+        self.port = USB_PORT
 
     def state(self) -> Dict[str, Any]:
         return self.bp.command({"cmd": "usb_host"})

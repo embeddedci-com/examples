@@ -14,6 +14,9 @@
 #define CFG_TUD_CDC_RX_BUFSIZE   512
 #define CFG_TUD_CDC_TX_BUFSIZE   512
 #define CFG_TUD_CDC_EP_BUFSIZE   64
+/* Send whether or not the host raised DTR, as bootloaders do (TinyUSB's default drops what does
+   not fit while DTR is low, which a host that never sets DTR sees as corrupt replies). */
+#define CFG_TUD_CDC_TX_OVERWRITABLE_IF_NOT_CONNECTED 0
 
 #define CFG_TUD_MSC_EP_BUFSIZE   4096
 
