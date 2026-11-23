@@ -214,7 +214,7 @@ static void test_flow(const tcase_t *tc)
 {
     const prog_proto_t *p = tc->proto;
     rig_t *r = rig_new(tc);
-    int rc = p->enter(&r->ctx);
+    int rc = run(r, p->enter);
     if (rc != PROG_OK) printf("  %s enter rc=%d\n", tc->name, rc);
     CHECK(rc == PROG_OK);
     CHECK(r->ctx.id_len >= 2);
@@ -254,7 +254,7 @@ static void test_locked(const tcase_t *tc)
     const prog_proto_t *p = tc->proto;
     rig_t *r = rig_new(tc);
     tc->chip->lock();
-    int rc = p->enter(&r->ctx);
+    int rc = run(r, p->enter);
     if (rc == PROG_OK)
     {
         CHECK(op(r, p->read, PROG_MEM_FLASH, PROG_ERASE_NONE, 0, 64) == PROG_E_LOCKED);
@@ -270,7 +270,7 @@ static void test_locked(const tcase_t *tc)
     r = rig_new(tc);
     tc->chip->lock();
     r->ctx.erase = PROG_ERASE_CHIP;
-    rc = p->enter(&r->ctx);
+    rc = run(r, p->enter);
     CHECK(rc == PROG_OK);
     if (rc == PROG_OK)
     {
@@ -287,7 +287,7 @@ static void test_stopped(const tcase_t *tc)
 {
     rig_t *r = rig_new(tc);
     g_chip = NULL;                    /* the emulator is stopped: nothing answers */
-    int rc = tc->proto->enter(&r->ctx);
+    int rc = run(r, tc->proto->enter);
     CHECK(rc == PROG_E_NO_ANSWER || rc == PROG_E_PROTOCOL);
     tc->proto->leave(&r->ctx, false);
     printf("  %-6s stopped emulator: rc=%d\n", tc->name, rc);
