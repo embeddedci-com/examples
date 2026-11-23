@@ -32,13 +32,22 @@ uint8_t const *tud_descriptor_device_cb(void)
     s_dev.iManufacturer = STR_MANUFACTURER;
     s_dev.iProduct = STR_PRODUCT;
     s_dev.iSerialNumber = STR_SERIAL;
-    switch (g_mode) {
-    case MODE_CDC: /* CDC uses an interface association */
+    if (mode_is_cdc(g_mode)) { /* CDC uses an interface association */
         s_dev.bDeviceClass = TUSB_CLASS_MISC;
         s_dev.bDeviceSubClass = MISC_SUBCLASS_COMMON;
         s_dev.bDeviceProtocol = MISC_PROTOCOL_IAD;
-        s_dev.idProduct = 0x4001;
-        break;
+    }
+    /* The serial bootloaders use the IDs of the boards they stand for (Arduino's VID 0x2341 for
+       the Uno, Mega, Leonardo and Zero): a host picks its flashing steps by them. Bench use only. */
+    switch (g_mode) {
+    case MODE_CDC: s_dev.idProduct = 0x4001; break;
+    case MODE_OPTIBOOT: s_dev.idVendor = 0x2341; s_dev.idProduct = 0x0043; break;   /* Uno R3 */
+    case MODE_ATMEGABOOT: s_dev.idProduct = 0x4021; break;                          /* unknown: probed */
+    case MODE_STK500V2: s_dev.idVendor = 0x2341; s_dev.idProduct = 0x0042; break;   /* Mega 2560 R3 */
+    case MODE_LEONARDO: s_dev.idVendor = 0x2341; s_dev.idProduct = 0x8036; break;   /* Leonardo sketch */
+    case MODE_CATERINA: s_dev.idVendor = 0x2341; s_dev.idProduct = 0x0036; break;   /* Leonardo bootloader */
+    case MODE_ZERO: s_dev.idVendor = 0x2341; s_dev.idProduct = 0x804D; break;       /* Zero sketch */
+    case MODE_SAMBA: s_dev.idVendor = 0x2341; s_dev.idProduct = 0x004D; break;      /* Zero bootloader */
     case MODE_MSC: s_dev.idProduct = 0x4002; break;
     case MODE_UF2: s_dev.idProduct = 0x4003; break;
     case MODE_TEENSY: /* HalfKay has no strings */
@@ -98,6 +107,7 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
 {
     (void)index;
     if (mode_is_hostile(g_mode)) return hostile_configuration();
+    if (mode_is_cdc(g_mode)) return s_cfg_cdc;
     switch (g_mode) {
     case MODE_CDC: return s_cfg_cdc;
     case MODE_MSC:

@@ -15,6 +15,7 @@
 
 #include "board.h"
 #include "disk.h"
+#include "loader.h"
 #include "tusb.h"
 #include "usbnode.h"
 
@@ -25,9 +26,12 @@
 #define MODE_MAGIC 0x55B0DE00u
 static uint32_t s_mode_magic __attribute__((section(".noinit")));
 static uint32_t s_mode_saved __attribute__((section(".noinit")));
+static uint32_t s_keep_image __attribute__((section(".noinit"))); /* MODE_MAGIC: a touch or leave reset */
 node_mode_t g_mode;
 
-static const char *const k_mode_names[MODE_COUNT] = {"cdc", "msc", "uf2", "teensy", "many", "big", "huge",
+static const char *const k_mode_names[MODE_COUNT] = {"cdc", "msc", "uf2", "teensy", "optiboot", "atmegaboot",
+                                                      "stk500v2", "leonardo", "caterina", "zero", "samba",
+                                                      "many", "big", "huge",
                                                       "badlen", "overlong", "strings", "nostr"};
 const char *mode_name(node_mode_t m) { return m < MODE_COUNT ? k_mode_names[m] : "?"; }
 
@@ -77,10 +81,13 @@ void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *lc)
     con_printf("EV cdc line %lu %u%c%s\n", (unsigned long)lc->bit_rate, lc->data_bits, "NOEMS"[lc->parity % 5],
                lc->stop_bits == 2 ? "2" : (lc->stop_bits == 1 ? "1.5" : "1"));
 }
+uint32_t st_cdc_baud(void) { return st.cdc_baud; }
+
 void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
 {
     (void)itf;
-    if (st.cdc_dtr && !dtr && st.cdc_baud == 1200) {
+    if (mode_is_loader(g_mode)) loader_line_state(dtr, st.cdc_dtr, st.cdc_baud);
+    if (st.cdc_dtr && !dtr && st.cdc_baud == 1200 && !mode_is_loader(g_mode)) {
         con_write("EV cdc touch1200\n");
     }
     st.cdc_dtr = dtr;
@@ -89,11 +96,15 @@ void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
 }
 static void cdc_task(void)
 {
-    if (g_mode != MODE_CDC || !tud_cdc_available()) return;
+    if (!mode_is_cdc(g_mode) || !tud_cdc_available()) return;
     uint8_t buf[64];
     uint32_t n = tud_cdc_read(buf, sizeof(buf));
     st.cdc_rx += n;
     st.last_usb_ms = millis();
+    if (mode_is_loader(g_mode)) {
+        loader_rx(buf, n);
+        return;
+    }
     tud_cdc_write(buf, n);
     tud_cdc_write_flush();
 }
@@ -209,7 +220,14 @@ static void print_status(void)
     con_printf("STATUS mode %s vbus %d mounted %d suspended %d mounts %lu unmounts %lu crs_sync %d trim %u\n",
                mode_name(g_mode), vbus_present(), tud_mounted(), tud_suspended(), (unsigned long)st.mounts,
                (unsigned long)st.unmounts, synced, trim);
-    if (g_mode == MODE_CDC)
+    if (mode_is_loader(g_mode)) {
+        const loader_stats_t *l = loader_stats();
+        con_printf("LOADER syncs %lu pages %lu bytes %lu hi 0x%lx erases %lu leaves %lu errors %lu dropped %lu\n",
+                   (unsigned long)l->syncs, (unsigned long)l->pages, (unsigned long)l->bytes_written,
+                   (unsigned long)l->hi, (unsigned long)l->erases, (unsigned long)l->leaves,
+                   (unsigned long)l->errors, (unsigned long)l->dropped);
+    }
+    if (mode_is_cdc(g_mode))
         con_printf("CDC rx %lu baud %lu dtr %d rts %d\n", (unsigned long)st.cdc_rx, (unsigned long)st.cdc_baud,
                    st.cdc_dtr, st.cdc_rts);
     if (g_mode == MODE_MSC || g_mode == MODE_UF2)
@@ -221,8 +239,8 @@ static void print_status(void)
 
 static void help(void)
 {
-    con_write("commands: status | mode cdc|msc|uf2|teensy|many|big|huge|badlen|overlong|strings|nostr | detach | attach | replug [ms] | files | uf2 |\n"
-              "          teensy [len] | format | dfu | reset | version\n");
+    con_write("commands: status | mode cdc|msc|uf2|teensy|optiboot|atmegaboot|stk500v2|leonardo|caterina|zero|samba|many|big|huge|badlen|overlong|strings|nostr | detach | attach | replug [ms] | files | uf2 |\n"
+              "          teensy [len] | image <addr> <len> | format | dfu | reset | version\n");
 }
 
 static void handle(char *line)
@@ -245,6 +263,7 @@ static void handle(char *line)
             if (!strcmp(arg, k_mode_names[m])) {
                 s_mode_magic = MODE_MAGIC;
                 s_mode_saved = (uint32_t)m;
+                s_keep_image = 0; /* a mode set here starts with erased flash */
                 con_printf("OK mode %s, resetting\n", k_mode_names[m]);
                 tud_disconnect();
                 board_reset();
@@ -273,6 +292,17 @@ static void handle(char *line)
         con_printf("TEENSY blocks %lu hi 0x%06lx reboots %lu len %lu crc %08lx\n", (unsigned long)st.teensy_blocks,
                    (unsigned long)st.teensy_hi, (unsigned long)st.teensy_reboots, (unsigned long)len,
                    (unsigned long)crc32_update(0, disk_sector(0), len));
+    } else if (!strcmp(line, "debug")) {
+        extern bool s_debug;
+        s_debug = arg && *arg == '1';
+        con_printf("OK debug %d\n", s_debug);
+    } else if (!strcmp(line, "image")) {
+        char *len = arg ? strchr(arg, ' ') : NULL;
+        if (!arg || !len) {
+            con_write("ERR image <addr> <len>\n");
+            return;
+        }
+        loader_print_image((uint32_t)strtoul(arg, NULL, 0), (uint32_t)strtoul(len + 1, NULL, 0));
     } else if (!strcmp(line, "format")) {
         disk_format(g_mode == MODE_UF2);
         st.uf2_reported = false;
@@ -314,6 +344,15 @@ static void event_task(void)
         con_write("EV uf2 complete\n");
     }
     led_yellow(millis() - st.last_usb_ms < 50u);
+    node_mode_t to;
+    if (loader_reset_due(&to)) { /* the touch, or a bootloader starting its sketch */
+        con_printf("EV reset into %s\n", mode_name(to));
+        s_mode_magic = MODE_MAGIC;
+        s_mode_saved = (uint32_t)to;
+        s_keep_image = MODE_MAGIC;
+        tud_disconnect();
+        board_reset();
+    }
 }
 
 int main(void)
@@ -326,6 +365,8 @@ int main(void)
         board_enter_rom_dfu();
     }
     if (g_mode == MODE_MSC || g_mode == MODE_UF2) disk_format(g_mode == MODE_UF2);
+    if (mode_is_loader(g_mode) && s_keep_image != MODE_MAGIC) loader_erase_image();
+    s_keep_image = 0;
 
     usb_hw_init();
     tud_configure_dwc2_t cfg = CFG_TUD_CONFIGURE_DWC2_DEFAULT;
