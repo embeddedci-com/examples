@@ -69,16 +69,16 @@ same table as a wiring profile (see [Wiring profile](#wiring-profile)):
 | LA2 | PB9 | I2C1 SDA | both (open drain), pod pull-up 4.7k |
 | LA3 | PA9 | USART1 TX, console | node |
 | LA4 | PA10 | USART1 RX, console | pod |
-| LA5 | PB0 | alarm | node |
+| LA5 | PB0 | alarm; reset of the PIC and TPI emulators | node (alarm), pod (emulators, open drain) |
 | LA6 | PA8 via 1 kOhm | strobe / data ready | node (strobe on) or pod (data-ready tests) |
-| LA7 | PC10 | USART3 TX | node |
+| LA7 | PC10 | USART3 TX; UPDI of the UPDI emulators | node (USART3), both (UPDI, open drain) |
 | LA8 | PC11 | USART3 RX | pod |
 | LA9 | PB13 | SPI2 SCK | node |
 | LA10 | PB15 | SPI2 MOSI | node |
 | LA11 | SWCLK | SWD | pod |
 | LA12 | SWDIO | SWD | both |
-| LA13 | PB14 | SPI2 MISO | pod |
-| LA14 | PB12 | SPI2 CS | node |
+| LA13 | PB14 | SPI2 MISO; clock of the chip emulators | pod |
+| LA14 | PB12 | SPI2 CS; data of the chip emulators | node (SPI CS), both (emulators) |
 
 **JTAG wiring (in place on the bench since 2026-11-23).** For the pod's JTAG tests LA9 and LA10 carry
 the node's JTAG pins instead of SPI2 SCK and MOSI: **PA15 (JTDI, morpho CN7 pin 17) -> LA9** and
@@ -113,6 +113,7 @@ wiring (`--benchpod-wiring`, `--benchpod-wiring-profile`, `BENCHPOD_WIRING`,
 make                         # build/process-node.elf, 8 MHz module crystal
 make MCP2515_OSC_HZ=16000000 # module with a 16 MHz crystal
 make test-host               # bit-timing, process logic and compensation unit tests, no hardware
+make test-host-progemu BENCHPOD_FW=../../benchpod-firmware   # chip emulators vs the pod's protocol code, no hardware
 ```
 
 With 8 MHz the fastest bitrate is 500 kbit/s; 1 Mbit/s needs a 16 MHz crystal.
@@ -161,6 +162,9 @@ With 8 MHz the fastest bitrate is 500 kbit/s; 1 Mbit/s needs a 16 MHz crystal.
 | `can print on\|off` | print received frames (default on) |
 | `can selftest` | loop a frame inside the MCP2515, nothing on the bus |
 | `can regs` | dump MCP2515 registers |
+| `prog_emu <updi\|updi2\|pic\|pic8\|pic18\|c2\|tpi\|pdi>` | answer as that chip for the pod's `prog_flash` (see [Chip emulators](#chip-emulators-prog_emu)); `PROG_EMU ok proto=.. chip=".."` |
+| `prog_emu stop` / `stat` / `clear` / `lock` / `list` | normal pins back; counters, timing and CRC32 of each memory; zero the counters; lock the chip; the chips |
+| `prog_emu dump <mem> <addr> <len>` | hex of an emulated memory (up to 4096 bytes), 32 bytes a line: `0040:<hex>` |
 
 Received frames print as `CAN rx id=0x123 ext=0 rtr=0 dlc=2 data=0102`.
 
@@ -234,6 +238,83 @@ transceiver with automatic direction control (`de off` here) works too.
 DE's falling edge is timed by EXTI line 8 on PA8: a byte counts as driven when DE fell within its
 stop bit, as a master that drives DE well drops it at the end of the last stop bit, often before
 the byte's receive interrupt has run.
+
+## Chip emulators (prog_emu)
+
+The BenchPod's `prog_flash` programs chips over their own pins: AVR UPDI, TPI and XMEGA PDI, PIC ICSP,
+Silicon Labs C2. With no chips on the bench, `prog_emu <chip>` makes the NUCLEO answer as one, so the
+pod's protocols run against something other than their own host test. The chip models are the
+bit-level models of benchpod-firmware's `stm32h563/test/test_prog_<proto>.c`, ported to this board
+(`progemu_<proto>.c`: plain C, no HAL, time from the cycle counter); the pins, interrupts and the
+console are `progemu.c`. Emulated memories live in RAM and start erased.
+
+Wires (all existing; the same LA channels as the SPI sensor and the UART sensor, so run these
+instead of those, not with them):
+
+| Pod | Node | Used by | Notes |
+|---|---|---|---|
+| LA13 | PB14 | clock: PIC ICSPCLK, C2CK, TPICLK, PDI_CLK | input with pull-up, EXTI on both edges |
+| LA14 | PB12 | data: ICSPDAT, C2D, TPIDATA, PDI_DATA | input; push-pull only while the chip drives it, released on the next clock edge; the pod holds a 10k pull-up |
+| LA5 | PB0 | PIC MCLR, TPI RESET (`"reset":5`) | input with pull-up, EXTI on both edges; the pod drives it open drain. The pod's own reset pin is wired to the NRST of the F446 and must not be used. PB0 is the alarm output again after `prog_emu stop` |
+| LA7 | PC10 | UPDI (`data` = 7) | USART3 in single-wire half duplex, 8E2, open drain |
+
+| `prog_emu` | Chip (default ID, as the pod reports it) | Memories (`dump`, CRC32) |
+|---|---|---|
+| `pic` | PIC16F1xxx-like, 6-bit commands, device 02A5 rev 2002: `a5020220` | `flash` 8192 B (4096 14-bit words, little endian), `eeprom` 256, `config` 64 (config words and user ID, 16 bits each) |
+| `pic8` | PIC16F18xxx-like, 8-bit commands, device 30B2 rev 2001: `b2300120` | same |
+| `pic18` | PIC18 Q-like, 8-bit commands, byte PC, device 7A31 rev 2003: `317a0320` | `flash` 8192 B (16-bit words), `eeprom` 256, `config` 64 (bytes at 0x200000 and 0x300000, one per 16-bit cell) |
+| `c2` | Silicon Labs C2, device 32 rev 03 derivative 21: `320321` | `flash` 8192 B; the lock byte is its last byte (0x1FFF), so an image that ends in a byte other than FF locks the chip |
+| `tpi` | ATtiny10: `1e9003` | `flash` 1024 B (16-byte sections), `config` 2 (the configuration byte, the lock bits) |
+| `pdi` | XMEGA-like, device 1E 94 41: `1e9441` | `flash` 20480 B (128-byte pages), `eeprom` 1024, `user` 128, `config` 8 (fuse bytes 0-6, the lock byte) |
+| `updi` | tinyAVR-like (NVM v0), signature 1E 94 21: `1e9421` | `flash` 16384 B at 0x8000 (64-byte pages), `eeprom` 256, `config` 10 (fuses), `user` 32 |
+| `updi2` | AVR DA-like (NVM v2), signature 1E 97 0A: `1e970a` | `flash` 16384 B at 0x800000 (512-byte pages), `eeprom` 512, `config` 16, `user` 32 |
+
+What the pod is told (the node knows no device tables, the pod does not either): `page` is the chip's
+write page in bytes (the Memories column), and the PIC chips need `flags` for the command set and the
+code-protect bit, with `baud` holding the byte address of the config word that carries it:
+
+| `prog_emu` | `flags` | `baud` | `page` |
+|---|---|---|---|
+| `pic` | `PIC_F_CP_BIT(5) \| PIC_F_HAS_EE` = `0x504` | `0x1000E` | 16 |
+| `pic8` | `PIC_F_SET8 \| PIC_F_CP_BIT(1)` = `0x101` | `0x10016` | 32 |
+| `pic18` | `PIC_F_SET8 \| PIC_F_BYTEPC \| PIC_F_CP_BIT(3)` = `0x303` | `0x300004` | 32 |
+
+`prog_emu lock` locks the chip the way its own lock works (PIC code protection, the C2 lock byte,
+the AVR lock bits, UPDI's lock); a chip erase unlocks it again. A real chip does the same, so a
+locked chip answers `info` where it can and refuses to be read or written.
+
+`prog_emu stat` prints, after one `PROG_EMU stat` line (`edges rise fall nrst_edges frames errors
+timing missed late core_mhz`):
+
+- `high_ns` and `low_ns` (min, max, and the average of the intervals under 100 us): the time the
+  clock stayed high (rising to falling edge) and low, as the node saw it, from the cycle counter
+  captured at the top of the interrupt. `high_hist_us` and `low_hist_us` count the intervals in the
+  bins `<0.5, <1, <2, <4, <8, <16, <64, <256, >=256` us. UPDI reports the SYNC bit time it measured
+  and the baud rate it set instead (`PROG_EMU updi ... sync_bit_ns=`).
+- `missed` and `late`: an edge that was gone before the handler read the pins (both edges came
+  while the previous one was handled), and an edge that arrived while the previous one was still
+  being handled (it is taken right after). Both mean the pod's bit-bang is faster than the node can
+  follow at its 16 MHz core clock; the handler does a model step and a pin write per edge and
+  nothing else (no printf, only counters), at the top interrupt priority.
+- `frames` and `errors`: commands or frames the chip took, and what a real chip would not accept
+  (bad frames, parity errors, a command while the NVM is busy, a wrong key, and the protocol's own
+  timing rules, which `timing` counts separately: PIC's 1 us command delays and 250 us entry hold,
+  the C2 enable wait). A protocol line follows (`PROG_EMU pic entries=.. bad_cmds=.. ...`).
+- `crc`: the CRC32 (zlib's) of every memory, in the byte layout of the table above, to compare with
+  the image's.
+
+UPDI details: the receiver is off while the chip waits for a frame. EXTI line 10 times the five
+falling edges of the SYNC byte (0x55), the baud rate is derived from them (the pod's UPDI links run at 115200 to 225000 baud), the receiver is switched on at the end of the
+SYNC and takes the rest of the frame. A low of more than 1 ms, or a framing error with 0x00, is a
+BREAK (the chip leaves its state and waits for a SYNC). A frame with a parity or framing error is
+dropped and counted. Replies leave a ring through the USART3 interrupt two bit times after the
+request's last stop bit, with the receiver off (no echo to take in). While an emulator runs, `uart3 open`,
+`modbus start` and `spi x` are refused (`prog_emu stop` first). The pod's UART engine and a UART session exclude
+each other, so the console must be closed while an UPDI job runs (the tests do that).
+
+`make test-host-progemu BENCHPOD_FW=<benchpod-firmware checkout>` runs all of this on the host: the
+pod's own `prog_<proto>.c` (branch `prog-flash` and later) against these models over `prog_sim`,
+erase, write, read back, the lock and a stopped chip. It checks the models, not the interrupt code.
 
 ## HIL tests
 
@@ -313,6 +394,13 @@ the 200 ms env reads, and PB0 rising within 0.5 ms of the reading that confirms 
 `tests/test_power.py`: firmware boot time and power-on-to-ready, idle and regulating
 supply current against a budget (`PROCESS_NODE_IDLE_MA_MAX`, whole Nucleo board), and
 5 ms / 50 ms / 500 ms supply dropouts (rides through or reboots cleanly, never hangs).
+
+`tests/test_prog_emu.py` (marker `prog`; skips without the pod's `prog_flash`): for each emulated chip, a random
+image through `load_bin` into PSRAM, `info` (ID), `start` with a chip erase, poll `status`, and the CRC32 of the
+emulated flash (`prog_emu stat`) against the image's; a wrong `expect_id` (the flash is untouched), a locked chip
+(refused without an erase, unlocked and flashed with one) and a stopped emulator (no answer). The edge timing
+each run measured is printed (`-s`) and appended to `$PROG_EMU_TIMING_LOG`. See
+[Chip emulators](#chip-emulators-prog_emu).
 
 `tests/test_update.py`: flash, boot and identify the image N times
 (`PROCESS_NODE_FLASH_CYCLES`, default 2; needs `--benchpod-firmware`).

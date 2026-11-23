@@ -116,10 +116,11 @@ static uint8_t s_txr[TXR];
 static volatile uint16_t s_txh, s_txt;
 static uint32_t s_bit_cyc;                      /* cycles per bit at the current baud */
 static uint32_t s_ft[5];                        /* the falling edges of the SYNC */
-static uint8_t s_nf;
+static uint8_t s_nf, s_pend;
+static uint32_t s_apb_div = 1U;                 /* core clock / USART3 clock */
 static uint32_t s_fall_t;
 static uint32_t s_sync_n, s_bad_sync, s_breaks, s_u_fe, s_u_pe, s_u_ne, s_u_ore, s_u_rx, s_u_tx,
-                s_tx_over, s_sync_last, s_sync_min, s_sync_max, s_baud, s_brr_last;
+                s_tx_over, s_sync_last, s_sync_min, s_sync_max, s_brr_last;
 
 void pe_updi_tx(const uint8_t *b, unsigned n)
 {
@@ -175,7 +176,11 @@ static void updi_next(uint32_t t_rx)
     }
 }
 
-/* An edge of the line while the chip waits for a frame: SYNC timing and BREAK. */
+/* An edge of the line while the chip waits for a frame: SYNC timing and BREAK.
+   The SYNC (0x55 at 8E2: start 0, data 1 0 1 0 1 0 1 0, parity 0, two stop bits) falls at 0, 2, 4, 6
+   and 8 bit times and stays low for two (D7 and the parity bit). The baud rate is worked out at the
+   fifth falling edge, and the receiver is switched on at the rising edge that ends the SYNC, two
+   bit times before the next start bit: the work in that second handler is a few register writes. */
 static void updi_edge(uint32_t t, int lvl)
 {
     const pe_chip_t *c = s_chip;
@@ -195,6 +200,24 @@ static void updi_edge(uint32_t t, int lvl)
         }
         s_ft[s_nf++] = t;
         s_fall_t = t;
+        s_pend = 0U;
+        if (s_nf == 5U)
+        {
+            uint32_t b = (s_ft[4] - s_ft[0]) >> 3;
+            uint32_t brr = (b + s_apb_div / 2U) / s_apb_div;   /* USART3 clock = core clock / s_apb_div */
+            if (brr >= 16U && brr <= 0xFFFFU)
+            {
+                USART3->BRR = brr;
+                s_brr_last = brr;
+                s_bit_cyc = b;
+                s_pend = 1U;
+            }
+            else
+            {
+                s_bad_sync++;
+                s_nf = 0U;
+            }
+        }
         return;
     }
     uint32_t low = t - s_fall_t;
@@ -202,37 +225,32 @@ static void updi_edge(uint32_t t, int lvl)
     {
         s_breaks++;
         s_nf = 0U;
+        s_pend = 0U;
         pe_now = t;
         c->brk();
         return;
     }
-    if (s_nf != 5U)
+    if (!s_pend)
     {
         return;
     }
-    /* the SYNC: falling edges at 0, 2, 4, 6 and 8 bit times, the last low lasting two (D7 and the
-       even parity bit), then the stop bits */
-    uint32_t b = (s_ft[4] - s_ft[0]) / 8U;
-    uint32_t pclk = HAL_RCC_GetPCLK1Freq();
-    uint32_t brr = (uint32_t)(((uint64_t)b * pclk + SystemCoreClock / 2U) / SystemCoreClock);
-    if (b == 0U || low < b + b / 2U || low > 2U * b + b / 2U || brr < 16U || brr > 0xFFFFU)
+    s_pend = 0U;
+    if (low < s_bit_cyc + s_bit_cyc / 2U || low > 2U * s_bit_cyc + s_bit_cyc / 2U)
     {
-        s_bad_sync++;
+        s_bad_sync++;                          /* not the SYNC's last two low bits */
         s_nf = 0U;
         return;
     }
-    USART3->BRR = brr;
-    s_brr_last = brr;
-    s_bit_cyc = b;
-    s_baud = pclk / brr;
     s_sync_n++;
-    s_sync_last = b;
-    if (b < s_sync_min) s_sync_min = b;
-    if (b > s_sync_max) s_sync_max = b;
+    s_sync_last = s_bit_cyc;
+    if (s_bit_cyc < s_sync_min) s_sync_min = s_bit_cyc;
+    if (s_bit_cyc > s_sync_max) s_sync_max = s_bit_cyc;
     s_nf = 0U;
     pe_now = t;
     c->sync();
-    updi_rx_on();
+    EXTI->IMR &= ~UPDI_LINE;
+    USART3->CR1 |= USART_CR1_RE;
+    s_umode = U_RX;
 }
 
 int progemu_usart3_irq(void)
@@ -318,9 +336,11 @@ static void updi_start(void)
     memset((void *)&s_ft, 0, sizeof s_ft);
     s_txh = s_txt = 0U;
     s_sync_n = s_bad_sync = s_breaks = s_u_fe = s_u_pe = s_u_ne = s_u_ore = s_u_rx = s_u_tx = 0U;
-    s_tx_over = s_sync_last = s_sync_max = s_baud = s_brr_last = 0U;
+    s_tx_over = s_sync_last = s_sync_max = s_brr_last = 0U;
     s_sync_min = 0xFFFFFFFFU;
     uint32_t pclk = HAL_RCC_GetPCLK1Freq();
+    s_apb_div = SystemCoreClock / pclk;
+    s_nf = s_pend = 0U;
     USART3->CR1 = 0U;
     USART3->CR2 = USART_CR2_STOP_1;                 /* 2 stop bits */
     USART3->CR3 = USART_CR3_HDSEL;                  /* single wire: TX pin is the line */
@@ -613,7 +633,8 @@ static void print_stat(void)
                (unsigned long)s_sync_n, (unsigned long)s_bad_sync, (unsigned long)s_breaks,
                (unsigned long)s_u_fe, (unsigned long)s_u_pe, (unsigned long)s_u_ne,
                (unsigned long)s_u_ore, (unsigned long)s_u_rx, (unsigned long)s_u_tx,
-               (unsigned long)s_tx_over, (unsigned long)s_baud, (unsigned long)s_brr_last,
+               (unsigned long)s_tx_over,
+               s_brr_last ? (unsigned long)(HAL_RCC_GetPCLK1Freq() / s_brr_last) : 0UL, (unsigned long)s_brr_last,
                ns_of(s_sync_last), s_sync_n ? ns_of(s_sync_min) : 0UL, ns_of(s_sync_max));
     }
     if (c->stat != NULL)

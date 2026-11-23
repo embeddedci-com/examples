@@ -5,6 +5,7 @@
 #include "i2ctarget.h"
 #include "spi2.h"
 #include "stm32f4xx_hal.h"
+#include "progemu.h"
 #include "rs485mock.h"
 #include "uart3.h"
 #include <stdio.h>
@@ -1105,6 +1106,14 @@ static int is_cmd(const char *cmd, const char *name, char **args)
 int bench_command(char *cmd)
 {
     char *args;
+    /* a chip emulator (progemu.c) owns PB12/PB14 (SPI2) or USART3 while it runs */
+    if (progemu_active() &&
+        (strncmp(cmd, "uart3 open", 10) == 0 || strncmp(cmd, "modbus start", 12) == 0 ||
+         strncmp(cmd, "spi x", 5) == 0))
+    {
+        printf("ERR prog_emu is running and owns those pins: prog_emu stop first\r\n");
+        return 1;
+    }
     if (is_cmd(cmd, "i2c", &args))
     {
         handle_i2c(args);
