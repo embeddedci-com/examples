@@ -1,5 +1,6 @@
 #include "uart3.h"
 #include "stm32f4xx_hal.h"
+#include "progemu.h"
 #include <string.h>
 
 #define TX_PIN GPIO_PIN_10
@@ -146,6 +147,10 @@ void uart3_flush(void)
 
 void USART3_IRQHandler(void)
 {
+    if (progemu_usart3_irq())
+    {
+        return; /* the UPDI emulator owns USART3 (progemu.c) */
+    }
     uint32_t sr;
     while ((sr = USART3->SR) & (USART_SR_RXNE | USART_SR_ORE))
     {

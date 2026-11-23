@@ -29,6 +29,7 @@
  * PA9 held low through reset starts the RL78 boot ROM emulator instead (rl78emu.h, README).
  */
 
+#include "progemu.h"
 #include "rl78emu.h"
 #include "rs485mock.h"
 #include "stm32f4xx_hal.h"
@@ -45,7 +46,7 @@
 #include <string.h>
 
 #define FW_NAME "process-node"
-#define FW_VERSION "0.3.3"
+#define FW_VERSION "0.3.4"
 
 #define CMD_BUF_SIZE 200
 
@@ -810,6 +811,9 @@ static void process_command(char *cmd)
     else if (bench_command(cmd))
     {
     }
+    else if (progemu_command(cmd))
+    {
+    }
     else if (strcmp(cmd, "reset") == 0 || strcmp(cmd, "reboot") == 0)
     {
         printf("RESET: rebooting via NVIC_SystemReset()\r\n");
@@ -847,6 +851,7 @@ static void print_help(void)
     printf("  modbus start <addr> <baud> [8E1..] [delay <us>] [de on|off] | stop | stat | delay <us> | reg <i> [<v>]\r\n");
     printf("                            RS-485 mock: a Modbus RTU device on USART3, DE on PA8 (strobe off;\r\n");
     printf("                            de off: an automatic-direction transceiver, no DE wire)\r\n");
+    progemu_help();
     printf("  status | can status       counters, mode, error state\r\n");
     printf("  can init [bitrate]        reset + configure the MCP2515 (default 500000)\r\n");
     printf("  can osc <MHz>             module crystal (8 or 16), then re-init\r\n");

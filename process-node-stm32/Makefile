@@ -46,7 +46,7 @@ LDFLAGS := \
 	-specs=nano.specs \
 	-specs=nosys.specs
 
-APP_SRCS := main.c rl78emu.c rl78emu_port.c modbus.c rs485mock.c analog.c env.c i2cbus.c i2ctarget.c spi2.c uart3.c bench_cmds.c mcp2515.c syscalls.c sysmem.c system_stm32f4xx.c
+APP_SRCS := main.c rl78emu.c rl78emu_port.c progemu.c progemu_pic.c modbus.c rs485mock.c analog.c env.c i2cbus.c i2ctarget.c spi2.c uart3.c bench_cmds.c mcp2515.c syscalls.c sysmem.c system_stm32f4xx.c
 
 HAL_SRCS := \
 	stm32f4xx_hal.c \
@@ -70,7 +70,7 @@ all: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).bin $(BUILD_DIR)/$(TARGET
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/%.o: %.c mcp2515.h mcp2515_timing.h analog.h proc.h sine_table.h thermostat.h env.h alarm.h bmp280_comp.h i2cbus.h i2ctarget.h spi2.h uart3.h dwt.h bench_cmds.h | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: %.c mcp2515.h mcp2515_timing.h analog.h proc.h sine_table.h thermostat.h env.h alarm.h bmp280_comp.h i2cbus.h i2ctarget.h spi2.h uart3.h dwt.h bench_cmds.h progemu.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/%.o: $(HAL_DIR)/Src/%.c | $(BUILD_DIR)
@@ -107,4 +107,15 @@ test-host: | $(BUILD_DIR)
 	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -I. tests/test_modbus.c modbus.c -o $(BUILD_DIR)/test_modbus
 	$(BUILD_DIR)/test_modbus
 
-.PHONY: all clean flash test-host
+# The chip emulators (progemu_*.c) against the pod's protocol code, on the host. Needs a checkout of
+# benchpod-firmware with the prog_flash sources: make test-host-progemu BENCHPOD_FW=<checkout>
+BENCHPOD_FW ?= ../../benchpod-firmware
+PE_FW_SRC := $(BENCHPOD_FW)/stm32h563/src
+PE_DEFS := $(foreach p,updi c2 tpi pdi,$(if $(wildcard progemu_$(p).c),-DPE_HAVE_$(p)))
+test-host-progemu: | $(BUILD_DIR)
+	$(HOSTCC) -std=gnu11 -Wall -Wextra -g $(PE_DEFS) -I. -I$(PE_FW_SRC) -I$(BENCHPOD_FW)/stm32h563/test \
+	  tests/test_progemu_host.c $(wildcard progemu_*.c) $(BENCHPOD_FW)/stm32h563/test/prog_sim.c \
+	  $(addprefix $(PE_FW_SRC)/prog_,updi.c pic.c c2.c tpi.c pdi.c) -o $(BUILD_DIR)/test_progemu_host
+	$(BUILD_DIR)/test_progemu_host
+
+.PHONY: all clean flash test-host test-host-progemu
