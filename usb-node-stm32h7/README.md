@@ -20,7 +20,7 @@ blocks), so a test compares it with what it sent.
 ```
 pod USB-C ── USB-C male breakout ──wires── USB-A female breakout ── USB-A to micro-USB cable ── CN13
                   │ VBUS/GND
-               5 V supply (powers the pod, and is the VBUS on CN13)
+               5 V supply (powers the pod)
 ```
 
 | USB-C male (pod) | USB-A female | Also |
@@ -28,7 +28,7 @@ pod USB-C ── USB-C male breakout ──wires── USB-A female breakout ─
 | D+ | D+ | |
 | D- | D- | |
 | GND | GND | 5 V supply GND |
-| VBUS | VBUS | 5 V supply + |
+| VBUS | not connected | 5 V supply + (powers the pod only) |
 | CC1, CC2 | not connected | the pod has its own 5.1 kOhm pull-downs |
 
 Keep D+/D- short. A USB-C charger as the 5 V supply only turns on when it sees the CC pull-downs:
@@ -36,7 +36,8 @@ pass CC through to the pod, or use a USB-A charger or a bench supply. On a pod w
 port, plug the cable into that port instead and set `USB_HOST_PORT=usb_a`.
 
 The Nucleo itself stays on its ST-LINK USB (CN1) to the computer: power (the power jumper on
-5V_STLK, the default), flashing and the console. VBUS on CN13 only tells the MCU a host is there.
+5V_STLK, the default), flashing and the console. CN13 needs only D+, D- and GND: the firmware does
+not sense VBUS (it does not reach PA9 on this board), it connects at boot.
 
 While the pod hosts, its USB-C port belongs to the board: no USB console or USB network to the
 computer. Reach the pod over Ethernet (or the cloud); the pod refuses `usb_host` over its own USB.
