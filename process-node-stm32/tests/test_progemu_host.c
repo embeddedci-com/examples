@@ -258,6 +258,8 @@ static void test_locked(const tcase_t *tc)
     if (rc == PROG_OK)
     {
         CHECK(op(r, p->read, PROG_MEM_FLASH, PROG_ERASE_NONE, 0, 64) == PROG_E_LOCKED);
+        fill(r, tc, 256, 3);
+        CHECK(op(r, p->write, PROG_MEM_FLASH, PROG_ERASE_NONE, 0, 256) == PROG_E_LOCKED);
     }
     else
     {
