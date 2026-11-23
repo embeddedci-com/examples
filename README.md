@@ -23,6 +23,9 @@ This repository contains small, focused examples used by EmbeddedCI workflows.
 - `process-node-stm32`  
   NUCLEO-F446RE + MCP2515 process-control node (CAN, analog in/out, thermostat loop, alarms) with a UART console, plus pytest HIL tests that run real use cases against the BenchPod.
 
+- `usb-node-stm32h7`  
+  NUCLEO-H753ZI as a USB device under test for the BenchPod's USB host: a USB serial port, a FAT12 drive, a UF2 bootloader and a Teensy loader it switches between, plus ST's ROM DfuSe loader, with pytest HIL tests for `usb_host` and `usb_flash`.
+
 - `yocto-kas-image`  
   Yocto/KAS manifest example (`kas.yml`) for building a `core-image-minimal` image (BeagleBone machine) with pinned layer revisions.
 
