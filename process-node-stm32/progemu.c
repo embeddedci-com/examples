@@ -35,7 +35,7 @@ uint32_t pe_pool[PE_POOL_BYTES / 4U];
 /* ---------------------------------------------------------------- the chips */
 
 static const pe_chip_t *const k_chips[] = {
-    &pe_pic, &pe_pic8, &pe_pic18,
+    &pe_pic, &pe_pic8, &pe_pic18, &pe_c2,
 };
 #define NCHIPS (sizeof k_chips / sizeof k_chips[0])
 

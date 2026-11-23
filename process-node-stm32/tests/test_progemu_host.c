@@ -130,6 +130,7 @@ typedef struct {
     uint32_t flags, baud;
     uint32_t size;               /* image bytes to write to the flash */
     int mask14;                  /* odd bytes keep 6 bits (14-bit words) */
+    int last_ff;                 /* C2: the flash's last byte is the lock byte, keep it erased */
 } tcase_t;
 
 static uint32_t crc32(const uint8_t *b, uint32_t n)
@@ -189,6 +190,7 @@ static void fill(rig_t *r, const tcase_t *tc, uint32_t n, unsigned seed)
         uint8_t b = (uint8_t)(x >> 24);
         r->img[i] = (tc->mask14 && (i & 1)) ? b & 0x3F : b;
     }
+    if (tc->last_ff && n >= tc->size) r->img[tc->size - 1U] = 0xFF;
 }
 
 static int op(rig_t *r, step_fn f, int mem, int erase, uint32_t addr, uint32_t len)
@@ -295,21 +297,21 @@ static void test_stopped(const tcase_t *tc)
 int main(void)
 {
     const tcase_t cases[] = {
-        { "pic",   &pe_pic,   &prog_proto_pic, 16, PIC_F_CP_BIT(5) | PIC_F_HAS_EE, 0x1000E, 8192, 1 },
-        { "pic8",  &pe_pic8,  &prog_proto_pic, 32, PIC_F_SET8 | PIC_F_CP_BIT(1), 0x10016, 8192, 1 },
-        { "pic18", &pe_pic18, &prog_proto_pic, 32, PIC_F_SET8 | PIC_F_BYTEPC | PIC_F_CP_BIT(3), 0x300004, 8192, 0 },
+        { "pic",   &pe_pic,   &prog_proto_pic, 16, PIC_F_CP_BIT(5) | PIC_F_HAS_EE, 0x1000E, 8192, 1, 0 },
+        { "pic8",  &pe_pic8,  &prog_proto_pic, 32, PIC_F_SET8 | PIC_F_CP_BIT(1), 0x10016, 8192, 1, 0 },
+        { "pic18", &pe_pic18, &prog_proto_pic, 32, PIC_F_SET8 | PIC_F_BYTEPC | PIC_F_CP_BIT(3), 0x300004, 8192, 0, 0 },
 #ifdef PE_HAVE_c2
-        { "c2",    &pe_c2,    &prog_proto_c2, 512, 0, 0, 8192, 0 },
+        { "c2",    &pe_c2,    &prog_proto_c2, 512, 0, 0, 8192, 0, 1 },
 #endif
 #ifdef PE_HAVE_tpi
-        { "tpi",   &pe_tpi,   &prog_proto_tpi, 16, 0, 0, 1024, 0 },
+        { "tpi",   &pe_tpi,   &prog_proto_tpi, 16, 0, 0, 1024, 0, 0 },
 #endif
 #ifdef PE_HAVE_pdi
-        { "pdi",   &pe_pdi,   &prog_proto_pdi, 128, 0, 0, 20480, 0 },
+        { "pdi",   &pe_pdi,   &prog_proto_pdi, 128, 0, 0, 20480, 0, 0 },
 #endif
 #ifdef PE_HAVE_updi
-        { "updi",  &pe_updi,  &prog_proto_updi, 64, 0, 0, 16384, 0 },
-        { "updi2", &pe_updi2, &prog_proto_updi, 512, 0, 0, 16384, 0 },
+        { "updi",  &pe_updi,  &prog_proto_updi, 64, 0, 0, 16384, 0, 0 },
+        { "updi2", &pe_updi2, &prog_proto_updi, 512, 0, 0, 16384, 0, 0 },
 #endif
     };
     for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++)

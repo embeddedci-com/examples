@@ -46,7 +46,7 @@ LDFLAGS := \
 	-specs=nano.specs \
 	-specs=nosys.specs
 
-APP_SRCS := main.c rl78emu.c rl78emu_port.c progemu.c progemu_pic.c modbus.c rs485mock.c analog.c env.c i2cbus.c i2ctarget.c spi2.c uart3.c bench_cmds.c mcp2515.c syscalls.c sysmem.c system_stm32f4xx.c
+APP_SRCS := main.c rl78emu.c rl78emu_port.c progemu.c progemu_pic.c progemu_c2.c modbus.c rs485mock.c analog.c env.c i2cbus.c i2ctarget.c spi2.c uart3.c bench_cmds.c mcp2515.c syscalls.c sysmem.c system_stm32f4xx.c
 
 HAL_SRCS := \
 	stm32f4xx_hal.c \
