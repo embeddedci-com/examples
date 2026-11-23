@@ -27,7 +27,8 @@ static uint32_t s_mode_magic __attribute__((section(".noinit")));
 static uint32_t s_mode_saved __attribute__((section(".noinit")));
 node_mode_t g_mode;
 
-static const char *const k_mode_names[MODE_COUNT] = {"cdc", "msc", "uf2", "teensy"};
+static const char *const k_mode_names[MODE_COUNT] = {"cdc", "msc", "uf2", "teensy", "many", "big", "huge",
+                                                      "badlen", "overlong", "strings", "nostr"};
 const char *mode_name(node_mode_t m) { return m < MODE_COUNT ? k_mode_names[m] : "?"; }
 
 static struct {
@@ -220,7 +221,7 @@ static void print_status(void)
 
 static void help(void)
 {
-    con_write("commands: status | mode cdc|msc|uf2|teensy | detach | attach | replug [ms] | files | uf2 |\n"
+    con_write("commands: status | mode cdc|msc|uf2|teensy|many|big|huge|badlen|overlong|strings|nostr | detach | attach | replug [ms] | files | uf2 |\n"
               "          teensy [len] | format | dfu | reset | version\n");
 }
 

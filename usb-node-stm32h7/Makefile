@@ -21,7 +21,7 @@ CFLAGS     := $(CFLAGS_COMMON) -Wall -Wextra -Werror -DUSBNODE_VERSION='"$(VERSI
 CFLAGS_LIB := $(CFLAGS_COMMON) -w
 LDFLAGS := $(ARCH) -T link.ld -Wl,--gc-sections -Wl,-Map=$(BUILD)/$(TARGET).map --specs=nano.specs --specs=nosys.specs -Wl,--no-warn-rwx-segments
 
-APP_SRCS := main.c board.c disk.c usb_descriptors.c syscalls.c
+APP_SRCS := main.c board.c disk.c usb_descriptors.c hostile.c syscalls.c
 LIB_SRCS := $(DEV)/Source/Templates/system_stm32h7xx.c \
   $(TUSB)/tusb.c $(TUSB)/common/tusb_fifo.c \
   $(TUSB)/device/usbd.c \

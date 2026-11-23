@@ -94,6 +94,13 @@ class UsbNode:
         """Make sure the node is in ``mode``, freshly booted (an empty drive, counters at zero)."""
         self.set_mode(mode)
 
+    def hard_reset(self) -> None:
+        """Reset the board through its ST-LINK (st-flash), e.g. out of the ROM bootloader."""
+        import subprocess
+        self.mark()
+        subprocess.run(["st-flash", "reset"], check=False, capture_output=True, timeout=30)
+        self.wait(r"^APP_OK$", 10)
+
     def files(self) -> dict:
         """The drive's root directory: {name: (size, crc32)}."""
         self.cmd("files", r"^FILE|^FILES")

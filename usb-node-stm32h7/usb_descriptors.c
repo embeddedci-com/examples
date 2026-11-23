@@ -47,7 +47,9 @@ uint8_t const *tud_descriptor_device_cb(void)
         s_dev.bcdDevice = 0x0280;
         s_dev.iManufacturer = s_dev.iProduct = s_dev.iSerialNumber = 0;
         break;
-    default: break;
+    default: /* the hostile modes: 0x4010 + mode */
+        s_dev.idProduct = (uint16_t)(0x4010 + (g_mode - MODE_MANY));
+        break;
     }
     return (uint8_t const *)&s_dev;
 }
@@ -90,9 +92,12 @@ static uint8_t const s_cfg_teensy[] = {
     TUD_HID_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_NONE, sizeof(s_teensy_report), 0x81, 64, 1),
 };
 
+uint8_t const *hostile_configuration(void);
+
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
 {
     (void)index;
+    if (mode_is_hostile(g_mode)) return hostile_configuration();
     switch (g_mode) {
     case MODE_CDC: return s_cfg_cdc;
     case MODE_MSC:
@@ -103,13 +108,25 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
 }
 
 /* ---- strings */
-static uint16_t s_str[33];
+static uint16_t s_str[65];
 
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 {
     (void)langid;
     char buf[32];
     const char *s = NULL;
+    if (g_mode == MODE_NOSTR && index != STR_LANG) return NULL; /* the request stalls */
+    if (g_mode == MODE_STRINGS && (index == STR_MANUFACTURER || index == STR_PRODUCT)) {
+        /* 60 characters: past the 47 a host may keep, with characters outside ASCII
+           (e-acute and a euro sign) at positions 3 and 10. */
+        unsigned n = 60;
+        for (unsigned i = 0; i < n; i++) s_str[1 + i] = (uint16_t)('a' + i % 26);
+        s_str[1 + 3] = 0x00E9;
+        s_str[1 + 10] = 0x20AC;
+        if (index == STR_MANUFACTURER) s_str[1] = 'M';
+        s_str[0] = (uint16_t)((TUSB_DESC_STRING << 8) | (2 * n + 2));
+        return s_str;
+    }
     switch (index) {
     case STR_LANG:
         s_str[1] = 0x0409;
