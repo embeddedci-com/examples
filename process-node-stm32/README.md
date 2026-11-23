@@ -80,6 +80,11 @@ same table as a wiring profile (see [Wiring profile](#wiring-profile)):
 | LA13 | PB14 | SPI2 MISO | pod |
 | LA14 | PB12 | SPI2 CS | node |
 
+**JTAG wiring (in place on the bench since 2026-11-23).** For the pod's JTAG tests LA9 and LA10 carry
+the node's JTAG pins instead of SPI2 SCK and MOSI: **PA15 (JTDI, morpho CN7 pin 17) -> LA9** and
+**PB3 (JTDO, Arduino D3 / CN10 pin 31) -> LA10**. TCK and TMS are SWCLK (LA11) and SWDIO (LA12). The
+SPI sensor tests skip on this wiring (see above); move the two wires back to PB13/PB15 to run them.
+
 ### Wiring profile
 
 This bench is not wired like the pod's default pins (UART RX on LA5, I2C SDA on LA1 and SCL on LA2):
@@ -289,8 +294,10 @@ SDK with `bp.sensors`. Run one group with `-m`:
 
 Two environment variables gate tests on wires that are not on every bench yet:
 
-- `BENCH_NEW_WIRING=1`: the SPI2 (LA9, LA10, LA13, LA14) and USART3 (LA7/LA8) wires are in place; without
-  it the SPI and UART sensor tests skip.
+- `BENCH_NEW_WIRING=1`: the USART3 (LA7/LA8) wires are in place; without it the UART sensor tests skip.
+  The SPI2 wires need no variable: the tests probe them (the node switches SPI2 between modes 0 and 3
+  and the pod reads SCK's idle level on its channel) and the SPI sensor tests skip when SCK is not
+  there, as with the JTAG wiring below.
 - `BENCH_LA6_RESISTOR=1`: the 1 kOhm resistor is in the PA8-LA6 wire; without it every test
   where the pod drives LA6 (data ready) skips. Install the resistor first: without it the pod and
   PA8 would drive the wire against each other if the firmware ever got it wrong.

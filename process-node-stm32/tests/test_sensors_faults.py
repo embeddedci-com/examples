@@ -73,7 +73,7 @@ def test_bus_stuck_recovers(node, wiring, sensors):
 
 
 @pytest.mark.sensors_spi
-@pytest.mark.needs_new_wiring
+@pytest.mark.sensors_spi   # skips when the probe finds no SPI2 wires (conftest spi2_wired)
 def test_spi_no_response(node, wiring, sensors):
     accel = sensors.start(local_def("spi_accel"), pins=spi_pins(wiring))
     assert node.spi([0x8F], read=1)[1:] == b"\x33"

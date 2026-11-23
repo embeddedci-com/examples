@@ -7,8 +7,10 @@ analog and lifecycle files share one boot.
 Emulated-sensor tests (test_sensors_*.py) are marked per group (``sensors_i2c``, ``sensors_spi``,
 ``sensors_uart``, ``sensors_drdy``, ``sensors_stimulus``, ``sensors_faults``), so ``-m sensors_spi``
 runs one group. Wires that are not on every bench yet gate their tests with an environment
-variable: BENCH_NEW_WIRING=1 (SPI2 on LA9/LA10/LA13/LA14, USART3 on LA7/LA8) and BENCH_LA6_RESISTOR=1 (the
-1 kOhm between PA8 and LA6 that lets the pod drive a data-ready line into PA8).
+variable: BENCH_NEW_WIRING=1 (USART3 on LA7/LA8) and BENCH_LA6_RESISTOR=1 (the 1 kOhm between PA8 and
+LA6 that lets the pod drive a data-ready line into PA8). The SPI2 wires are probed instead
+(``spi2_wired``): the SPI sensor tests skip when SCK is not on its LA channel, as on a bench that
+carries the JTAG wires on LA9/LA10.
 
 The LA channels come from the bench's wiring profile, ``wiring/process-node-stm32.json``, stored on the
 pod under the name ``process-node-stm32`` and loaded by that name (``bp.load_wiring``) for the run.
@@ -56,12 +58,12 @@ K = 150
 SENSOR_MARKERS = {
     "hardware": "needs the bench (pod + node)",
     "sensors_i2c": "emulated I2C sensors on LA1/LA2, read by the node over I2C1",
-    "sensors_spi": "the emulated SPI sensor on LA9/LA10/LA13/LA14 (BENCH_NEW_WIRING=1)",
+    "sensors_spi": "the emulated SPI sensor on LA9/LA10/LA13/LA14 (skips when the probe finds SPI2 SCK elsewhere)",
     "sensors_uart": "emulated UART sensors on LA7/LA8 (BENCH_NEW_WIRING=1)",
     "sensors_drdy": "a data-ready line the pod drives on LA6 into PA8 (BENCH_LA6_RESISTOR=1)",
     "sensors_stimulus": "values over time from a stimulus",
     "sensors_faults": "injected sensor faults",
-    "needs_new_wiring": "skips unless BENCH_NEW_WIRING=1 (SPI2 on LA9/LA10/LA13/LA14, USART3 on LA7/LA8)",
+    "needs_new_wiring": "skips unless BENCH_NEW_WIRING=1 (USART3 on LA7/LA8)",
     "needs_la6_resistor": "skips unless BENCH_LA6_RESISTOR=1 (1 kOhm between PA8 and LA6)",
     "rl78": "RL78 Protocol A programming on LA3 against the node's RL78 boot ROM emulator",
     "rs485": "Modbus RTU through the node's RS-485 mock: LA8/LA7 data, LA6 DE (needs both wire sets)",
@@ -80,8 +82,8 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if item.get_closest_marker("needs_new_wiring") and not new_wiring:
             item.add_marker(pytest.mark.skip(
-                reason="the SPI2 (LA9, LA10, LA13, LA14) and USART3 (LA7/LA8) wires are not in place: wire "
-                       "them as in the README, then set BENCH_NEW_WIRING=1"))
+                reason="the USART3 wires (LA7/LA8) are not in place: wire them as in the README, "
+                       "then set BENCH_NEW_WIRING=1"))
         if item.get_closest_marker("needs_la6_resistor") and not la6:
             item.add_marker(pytest.mark.skip(
                 reason="install the 1 kOhm resistor on the LA6-PA8 wire first (the pod drives "
@@ -630,3 +632,32 @@ def wait_alarm(node, cond, *, timeout, what):
             return last
         time.sleep(0.1)
     pytest.fail(f"timed out after {timeout} s waiting for {what}; last: {last}")
+
+
+@pytest.fixture(scope="session")
+def spi2_wired(benchpod, wiring, node):
+    """Is the node's SPI2 SCK (PB13) on the SPI sensor's SCK channel? Probed, not configured: the
+    node switches SPI2 between mode 0 and mode 3, whose clock idles low and high, and the pod reads
+    the channel. A bench that carries other wires there (the JTAG test wiring puts PA15 and PB3 on
+    LA9/LA10) reads a level that does not follow. This tests the wire only, never the emulated
+    sensor, so a broken SPI emulation still fails instead of skipping."""
+    levels = []
+    try:
+        for mode in (0, 3, 0):
+            node.spi_cfg(mode, 500_000)
+            time.sleep(0.02)
+            levels.append(benchpod.read_gpio(wiring.spi_sclk))
+    finally:
+        node.spi_cfg(0, 500_000)
+    return levels == [0, 1, 0], levels
+
+
+@pytest.fixture(autouse=True)
+def _skip_without_spi2_wires(request):
+    if not request.node.get_closest_marker("sensors_spi"):
+        return
+    wired, levels = request.getfixturevalue("spi2_wired")
+    if not wired:
+        pytest.skip(f"SPI2 SCK (PB13) is not on the SPI sensor's SCK channel: it read {levels} for SPI "
+                    "modes 0, 3, 0, not [0, 1, 0]. Wire SPI2 as in the README (the bench may carry the "
+                    "JTAG wires on LA9/LA10)")
