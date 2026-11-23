@@ -328,7 +328,9 @@ int main(void)
 
     usb_hw_init();
     tud_configure_dwc2_t cfg = CFG_TUD_CONFIGURE_DWC2_DEFAULT;
-    cfg.vbus_sensing = 1;
+    /* No VBUS sensing: the pull-up goes on at boot, whatever PA9 reads (status still reports it).
+       A host that is not there yet simply sees the device when it arrives. */
+    cfg.vbus_sensing = 0;
     tud_configure(0, TUD_CFGID_DWC2, &cfg);
     tusb_rhport_init_t init = {.role = TUSB_ROLE_DEVICE, .speed = TUSB_SPEED_FULL};
     if (!tusb_rhport_init(0, &init)) {
