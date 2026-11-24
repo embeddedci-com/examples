@@ -294,11 +294,6 @@ static void test_flow(const tcase_t *tc)
     }
     free(mb);
     CHECK(r->sim.contention == 0);
-    if (strncmp(tc->name, "pic", 3) == 0)
-    {
-        /* a PIC read bit appears after the RISING edge and is let go at the falling one */
-        CHECK(g_fall_driven == 0);
-    }
     printf("  %-6s peek vs drive: %u of %u edges differ\n", tc->name, g_peek_miss, g_peek_n);
     CHECK(g_peek_miss * 1000U <= g_peek_n);
     report("flow", tc, r);

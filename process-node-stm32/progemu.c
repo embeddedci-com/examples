@@ -728,6 +728,8 @@ static void pe_poll(const pe_chip_t *c)
         uint32_t t = DWT->CYCCNT;
         prev = (prev & ~ch) | (idr & ch);
         idle_t = t;
+        int before = s_drv;                    /* what the chip drove when the edge came */
+        s_chg = 0U;
         /* the pin first, from what the chip was going to drive after this edge, then the model */
         if ((ch & CLK_LINE) && s_pv != s_drv)
         {
@@ -757,8 +759,6 @@ static void pe_poll(const pe_chip_t *c)
             {
                 s_prev_clk = clk;
                 pe_now = t;
-                int before = s_drv;
-                s_chg = 0U;
                 c->edge(clk, s_drv >= 0 ? -1 : (int)((idr >> 12) & 1U));
                 drive_data(c->drive());
                 if (c->data_want != NULL && (*c->data_want != 0U) != s_data_on)

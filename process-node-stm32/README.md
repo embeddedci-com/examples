@@ -338,6 +338,12 @@ low times are inflated and the chip saw a damaged stream. The HIL test SKIPS on 
 failure (a result other than `ok`, a SYNC outside UPDI's enable window, nothing sent) still fails. PDI's
 data-line interrupt (the enable timing) is switched off once the chip is enabled, to halve the interrupt load.
 
+**PIC reads are driven early.** A real PIC changes its read data within 80 ns after a rising clock edge; this
+node needs about a microsecond. The pod samples only while the clock is high, so each bit after the first is put
+on the wire as soon as the falling edge has let the previous one go (the start bit comes with the first rising
+edge, and the pod drops it). A pod that sampled with the clock low would see the next bit one clock early; none
+of the pod's read paths does. The trace shows both edges, so the waveform is visible.
+
 **What the node cannot do exactly.** All of it runs from interrupts (at 128 MHz while an emulator runs):
 - C2 specifies the chip driving C2D within nanoseconds of the rising edge, and the pod's feed reads
   120 ns or more after it. The interrupt needs about a microsecond, so `c2` can hand the pod the

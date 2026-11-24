@@ -335,6 +335,16 @@ static void on_nrst(int low)
     if (!low) c->ran++;
 }
 
+/* The bit of a read the next rising edge is to bring. A real chip changes its output within 80 ns
+   after the rising edge; this node needs about a microsecond. A pod only samples while the clock is
+   high, so the bit is put on the wire as soon as the falling edge has let the previous one go: it is
+   there when the pod looks, however late the interrupt is. The first bit (start bit, always 0, which
+   the pod drops) still comes with the first rising edge. */
+static int read_bit(void)
+{
+    return (int)((C.frame >> (C.set8 ? C.plen - 1 - C.k : C.k)) & 1U);
+}
+
 static void rise(void)
 {
     chip_t *c = &C;
@@ -355,7 +365,7 @@ static void rise(void)
             c->first_cmd = 0; c->busy_us = 0;
         }
         if (c->st != S_CMD && c->k == 0 && idle_cyc() < us) c->timing_err++;   /* TDLY command to data */
-        if (c->st == S_PR) c->out = (int)((c->frame >> (c->set8 ? c->plen - 1 - c->k : c->k)) & 1);
+        if (c->st == S_PR) c->out = read_bit();
     }
     c->ts = pe_now;
 }
@@ -394,6 +404,7 @@ static void fall(int bit)
     {
         c->out = -1;
         if (++c->k == c->plen) { c->st = S_CMD; c->k = 0; c->sh = 0; }
+        else if (c->k >= 1) c->out = read_bit();      /* the next bit is on the wire before its rising edge */
     }
 }
 
@@ -416,8 +427,8 @@ static int peek(int clk)
 {
     chip_t *c = &C;
     if (!c->prog || c->st != S_PR || !c->nrst_low) return -1;
-    if (clk == 0) return -1;
-    return (int)((c->frame >> (c->set8 ? c->plen - 1 - c->k : c->k)) & 1U);
+    if (clk == 0) return c->k + 1 < c->plen ? (int)((c->frame >> (c->set8 ? c->plen - 2 - c->k : c->k + 1)) & 1U) : -1;
+    return read_bit();
 }
 
 static void chip_init(int kind)
