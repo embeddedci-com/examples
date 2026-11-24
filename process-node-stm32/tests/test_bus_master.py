@@ -10,6 +10,8 @@ import contextlib
 
 import pytest
 
+from embeddedci.benchpod import FpgaImage
+
 pytestmark = pytest.mark.hardware
 
 TARGET = 0x42
@@ -25,6 +27,23 @@ def b64(data):
 
 def unb64(s):
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)) if s else b""
+
+
+@pytest.fixture(scope="module", autouse=True)
+def bus_master_image(benchpod):
+    """The pod's I2C and SPI masters are not in the emulation image (gateware v55 to v64 have them
+    everywhere, v65+ only in the loop and deep-replay images). test_alarms.py runs before this
+    module and leaves the emulation image loaded: stop the sensors and select the loop image."""
+    has_masters = getattr(benchpod, "has_bus_masters", None)
+    if has_masters is not None:
+        needs_switch = has_masters() is False
+    else:   # an SDK without has_bus_masters(): the status says the image and the gateware
+        caps = benchpod.capabilities
+        needs_switch = caps.gateware >= 65 and caps.fpga_image == "emu"
+    if needs_switch:
+        if benchpod.supports("sensors"):
+            benchpod.sensors.stop()
+        benchpod.fpga_image(FpgaImage.LOOP)
 
 
 def require_master(benchpod):

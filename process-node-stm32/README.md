@@ -460,6 +460,8 @@ long transfers, a NACK, a scan, and the pull-up check. A capture with a `send` g
 transaction and its decode, and SCL never runs faster than asked. SPI modes 0-3 run on
 LA1/LA2/LA5/LA6, and a gpio send drives LA6 (both need `BENCH_LA6_RESISTOR=1`). `la_dir`
 refuses a push-pull output on the node's alarm output.
+From gateware v65 the emulation image has no I2C or SPI master, so a module fixture stops the
+sensors and selects the loop image first (`test_alarms.py` before it leaves emulation loaded).
 
 Emulated sensors (`tests/test_sensors_*.py`): the pod plays sensor definitions, the sensor
 library's (BME280, BMP280, SHT4x, MPU-6050, GPS) and small test-only ones in `tests/sensor_defs/`,
