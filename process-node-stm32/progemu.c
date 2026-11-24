@@ -33,6 +33,87 @@ uint32_t pe_cyc_us = 16U;
 uint32_t pe_break_frame_us = 6667U;
 uint32_t pe_pool[PE_POOL_BYTES / 4U];
 
+/* ---------------------------------------------------------------- core clock */
+
+/* The node runs from the 16 MHz HSI. The pod's bit-bang moves a pin edge every 2 us or so, which a
+   16 MHz core (32 cycles an edge) cannot follow. While an emulator runs the core is switched to
+   128 MHz from the PLL (HSI / 8 * 128 / 2). APB1 and APB2 are divided by 8, so every peripheral
+   bus stays at exactly 16 MHz: USART1's baud rate, I2C, SPI, the ADC and USART3 need no change.
+   Only the SysTick (HAL_InitTick does it), the cycle-count users (they read SystemCoreClock) and
+   TIM6 (its clock is 2 x PCLK1 while APB1 is divided: ARR is doubled) follow. `prog_emu stop`
+   puts the 16 MHz clock back. */
+static uint8_t s_fast;
+
+static void tim6_scale(int up)
+{
+    if (TIM6->CR1 & TIM_CR1_CEN)
+    {
+        TIM6->ARR = up ? (TIM6->ARR + 1U) * 2U - 1U : (TIM6->ARR + 1U) / 2U - 1U;
+    }
+}
+
+static void clock_fast(void)
+{
+    if (s_fast)
+    {
+        return;
+    }
+    RCC_OscInitTypeDef o = {0};
+    RCC_ClkInitTypeDef k = {0};
+    __HAL_RCC_PWR_CLK_ENABLE();
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+    o.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+    o.HSIState = RCC_HSI_ON;
+    o.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+    o.PLL.PLLState = RCC_PLL_ON;
+    o.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+    o.PLL.PLLM = 8;                     /* 2 MHz */
+    o.PLL.PLLN = 128;                   /* 256 MHz VCO */
+    o.PLL.PLLP = RCC_PLLP_DIV2;         /* 128 MHz */
+    o.PLL.PLLQ = 4;
+    o.PLL.PLLR = 2;
+    if (HAL_RCC_OscConfig(&o) != HAL_OK)
+    {
+        return;
+    }
+    k.ClockType = RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    k.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    k.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    k.APB1CLKDivider = RCC_HCLK_DIV8;
+    k.APB2CLKDivider = RCC_HCLK_DIV8;
+    if (HAL_RCC_ClockConfig(&k, FLASH_LATENCY_4) != HAL_OK)
+    {
+        return;
+    }
+    FLASH->ACR |= FLASH_ACR_ICEN | FLASH_ACR_DCEN | FLASH_ACR_PRFTEN;
+    tim6_scale(1);
+    s_fast = 1U;
+}
+
+static void clock_slow(void)
+{
+    if (!s_fast)
+    {
+        return;
+    }
+    RCC_OscInitTypeDef o = {0};
+    RCC_ClkInitTypeDef k = {0};
+    tim6_scale(0);
+    k.ClockType = RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    k.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+    k.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    k.APB1CLKDivider = RCC_HCLK_DIV1;
+    k.APB2CLKDivider = RCC_HCLK_DIV1;
+    (void)HAL_RCC_ClockConfig(&k, FLASH_LATENCY_0);
+    o.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+    o.HSIState = RCC_HSI_ON;
+    o.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+    o.PLL.PLLState = RCC_PLL_OFF;
+    (void)HAL_RCC_OscConfig(&o);
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+    s_fast = 0U;
+}
+
 /* ---------------------------------------------------------------- the chips */
 
 static const pe_chip_t *const k_chips[] = {
@@ -49,6 +130,7 @@ static const pe_chip_t *volatile s_chip;   /* NULL: stopped */
 #define DATA_LINE  (1UL << 12)    /* PB12, PDI: the pod forcing data high arms the enable timing */
 #define UPDI_LINE  (1UL << 10)    /* PC10 */
 
+static uint8_t s_data_on;
 static volatile int s_drv = -1;   /* what PB12 is driven to: 0, 1, or -1 released */
 
 static inline void drive_data(int d)
@@ -127,6 +209,9 @@ typedef struct { uint32_t n, min, max, last, low_last, low_max; } gapst_t;
 static gapst_t s_gap[2];                         /* 0: enable pulse, 1: BREAK */
 static int s_ev_kind = -1;
 static uint32_t s_ev_end;
+static uint32_t d_hunts, d_gate_rej, d_ival, d_bad_brr, d_bad_low, d_bursts, d_err_drop;
+static uint8_t s_lastrx[8];
+static uint32_t s_nlast;
 static uint32_t s_sync_n, s_bad_sync, s_breaks, s_u_fe, s_u_pe, s_u_ne, s_u_ore, s_u_rx, s_u_tx,
                 s_tx_over, s_sync_last, s_sync_min, s_sync_max, s_brr_last;
 
@@ -158,6 +243,8 @@ static void updi_hunt(void)
 {
     USART3->CR1 &= ~USART_CR1_RE;
     s_nf = 0U;
+    s_pend = 0U;
+    d_hunts++;
     EXTI->PR = UPDI_LINE;
     EXTI->IMR |= UPDI_LINE;
     s_umode = U_HUNT;
@@ -186,12 +273,15 @@ static void updi_next(uint32_t t_rx)
         {
             if ((int32_t)(s_hold - target) > 0) target = s_hold;   /* an ACK held until a write is done */
             s_holdv = 0U;
+    d_hunts = d_gate_rej = d_ival = d_bad_brr = d_bad_low = d_bursts = d_err_drop = 0U;
+    s_nlast = 0U;
     memset(s_gap, 0, sizeof s_gap);
     s_ev_kind = -1;
         }
         while ((int32_t)(DWT->CYCCNT - target) < 0)
         {
         }
+        d_bursts++;
         USART3->CR1 = (USART3->CR1 & ~USART_CR1_RE) | USART_CR1_TXEIE;
         s_umode = U_TX;
     }
@@ -226,6 +316,7 @@ static void updi_edge(uint32_t t, int lvl)
             pe_now = t;
             if (!c->sync_gate())          /* disabled, or a SYNC outside its window: not taken */
             {
+                d_gate_rej++;
                 s_fall_t = t;
                 return;
             }
@@ -235,6 +326,7 @@ static void updi_edge(uint32_t t, int lvl)
             uint32_t ref = s_ft[1] - s_ft[0], d = t - s_ft[s_nf - 1U];
             if (d < ref - ref / 4U || d > ref + ref / 4U)
             {
+                d_ival++;
                 s_nf = 0U;
             }
         }
@@ -259,6 +351,7 @@ static void updi_edge(uint32_t t, int lvl)
             else
             {
                 s_bad_sync++;
+                d_bad_brr++;
                 s_nf = 0U;
             }
         }
@@ -296,6 +389,7 @@ static void updi_edge(uint32_t t, int lvl)
     if (low < s_bit_cyc + s_bit_cyc / 2U || low > 2U * s_bit_cyc + s_bit_cyc / 2U)
     {
         s_bad_sync++;                          /* not the SYNC's last two low bits */
+        d_bad_low++;
         s_nf = 0U;
         return;
     }
@@ -330,6 +424,7 @@ int progemu_usart3_irq(void)
         if (sr & USART_SR_RXNE)
         {
             s_u_rx++;
+            s_lastrx[s_nlast++ & 7U] = b;
             pe_now = t;
             if ((sr & USART_SR_FE) && b == 0U)
             {
@@ -339,7 +434,7 @@ int progemu_usart3_irq(void)
             }
             else if (sr & (USART_SR_FE | USART_SR_PE | USART_SR_NE))
             {
-                /* a bad frame is not taken; the pod times out and breaks */
+                d_err_drop++;                  /* a bad frame is not taken; the pod times out and breaks */
             }
             else
             {
@@ -454,6 +549,12 @@ void EXTI15_10_IRQHandler(void)
             pe_now = t;
             c->edge(clk, s_drv >= 0 ? -1 : (int)((idr >> 12) & 1U));
             drive_data(c->drive());
+            if (c->data_want != NULL && (*c->data_want != 0U) != s_data_on)
+            {
+                s_data_on = *c->data_want != 0U;
+                if (s_data_on) { EXTI->PR = DATA_LINE; EXTI->IMR |= DATA_LINE; }
+                else EXTI->IMR &= ~DATA_LINE;
+            }
             s_edges++;
             if (clk) s_rise++; else s_fall++;
             if (s_first)
@@ -526,6 +627,7 @@ static void wires_start(const pe_chip_t *c)
         EXTI->FTSR |= DATA_LINE;
         EXTI->PR = DATA_LINE;
         EXTI->IMR |= DATA_LINE;
+        s_data_on = 1U;
     }
     s_prev_clk = (int)((GPIOB->IDR >> 14) & 1U);
     EXTI->PR = CLK_LINE;
@@ -591,6 +693,7 @@ static void pe_stop(void)
         wires_stop();
     }
     s_chip = NULL;
+    clock_slow();
 }
 
 static void pe_start(const pe_chip_t *c)
@@ -598,6 +701,7 @@ static void pe_start(const pe_chip_t *c)
     pe_stop();
     rs485_stop();
     uart3_close();
+    clock_fast();
     dwt_init();
     pe_cyc_us = SystemCoreClock / 1000000U;
     for (unsigned i = 0; i < NBIN - 1U; i++)
@@ -697,6 +801,17 @@ static void print_stat(void)
            (unsigned long)pe_cyc_us);
     if (!c->uart)
     {
+        if (s_missed != 0U || s_late != 0U)
+        {
+            printf("PROG_EMU WARNING timing_valid=0 missed=%lu late=%lu: the node did not follow every edge "
+                   "(edges merged or taken late), so the high/low times and the frames below are NOT the "
+                   "pod's timing and the chip saw a damaged stream\r\n",
+                   (unsigned long)s_missed, (unsigned long)s_late);
+        }
+        else
+        {
+            printf("PROG_EMU timing_valid=1 missed=0 late=0\r\n");
+        }
         print_gap("high", &s_hi);
         print_gap("low", &s_lo);
         print_bins("high", &s_hi);
@@ -713,6 +828,19 @@ static void print_stat(void)
                (unsigned long)s_tx_over,
                s_brr_last ? (unsigned long)(HAL_RCC_GetPCLK1Freq() / s_brr_last) : 0UL, (unsigned long)s_brr_last,
                ns_of(s_sync_last), s_sync_n ? ns_of(s_sync_min) : 0UL, ns_of(s_sync_max));
+    }
+    if (c->uart)
+    {
+        printf("PROG_EMU updi_dbg hunts=%lu gate_rejects=%lu interval_resets=%lu bad_brr=%lu bad_low=%lu "
+               "tx_bursts=%lu bad_frames_dropped=%lu last_rx=",
+               (unsigned long)d_hunts, (unsigned long)d_gate_rej, (unsigned long)d_ival,
+               (unsigned long)d_bad_brr, (unsigned long)d_bad_low, (unsigned long)d_bursts,
+               (unsigned long)d_err_drop);
+        for (uint32_t i = 0; i < 8U && i < s_nlast; i++)
+        {
+            printf("%02x", s_lastrx[(s_nlast - 1U - i) & 7U]);
+        }
+        printf("\r\n");
     }
     if (c->uart)
     {
@@ -789,6 +917,8 @@ static void clear_counters(void)
     s_sync_min = 0xFFFFFFFFU;
     memset(s_gap, 0, sizeof s_gap);
     s_ev_kind = -1;
+    d_hunts = d_gate_rej = d_ival = d_bad_brr = d_bad_low = d_bursts = d_err_drop = 0U;
+    s_nlast = 0U;
 }
 
 /* ---------------------------------------------------------------- console */

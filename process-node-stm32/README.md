@@ -299,7 +299,22 @@ write; UPDI starting disabled (enable pulse, or a BREAK, then SYNC inside its wi
 the 10 ms v2 EEPROM byte write (a streamed byte meanwhile is lost: `drops`; an ACKed one is held),
 NVMPROG appearing 2 ms after the key, the megaAVR 0 flash base.
 
-**What the node cannot do exactly.** All of it runs from interrupts at the F446's 16 MHz core:
+**Core clock.** The node normally runs from the 16 MHz HSI; the pod moves a pin edge about every 2 us,
+which is 32 core cycles, too few for an interrupt that runs a chip model. While an emulator runs, the core
+is switched to **128 MHz** from the PLL (HSI / 8 x 128 / 2, 4 flash wait states, instruction and data
+caches on) and `prog_emu stop` puts the 16 MHz clock back, so the rest of the node keeps its timing. APB1 and
+APB2 are divided by 8, which leaves every peripheral bus at exactly 16 MHz: USART1's baud rate, I2C, SPI, the
+ADC and USART3 are unchanged, and only the SysTick, the cycle-count users (`core_mhz` in `stat` shows 128) and
+TIM6 (its clock is twice PCLK1 while APB1 is divided; ARR is doubled) follow. 180 MHz would put the buses at
+45/90 MHz and need every peripheral reprogrammed, so it is not used. At 128 MHz an interrupt has 256 cycles
+per 2 us edge.
+
+**A run with missed edges is not a timing result.** If `missed` or `late` is not 0, `stat` prints
+`PROG_EMU WARNING timing_valid=0 ...` instead of `timing_valid=1`: edges were merged or taken late, the high and
+low times are inflated and the chip saw a damaged stream. The test fails on it for the two-wire chips. PDI's
+data-line interrupt (the enable timing) is switched off once the chip is enabled, to halve the interrupt load.
+
+**What the node cannot do exactly.** All of it runs from interrupts (at 128 MHz while an emulator runs):
 - C2 specifies the chip driving C2D within nanoseconds of the rising edge, and the pod's feed reads
   120 ns or more after it. The interrupt needs about a microsecond, so `c2` can hand the pod the
   previous bit if the pod samples early; `c2early` puts each bit on the wire during the preceding
@@ -330,7 +345,7 @@ timing missed late core_mhz`):
 - `missed` and `late`: an edge that was gone before the handler read the pins (both edges came
   while the previous one was handled), and an edge that arrived while the previous one was still
   being handled (it is taken right after). Both mean the pod's bit-bang is faster than the node can
-  follow at its 16 MHz core clock; the handler does a model step and a pin write per edge and
+  follow at the core clock; the handler does a model step and a pin write per edge and
   nothing else (no printf, only counters), at the top interrupt priority.
 - `frames` and `errors`: commands or frames the chip took, and what a real chip would not accept
   (bad frames, parity errors, a command while the NVM is busy, a wrong key, and the protocol's own
@@ -338,6 +353,11 @@ timing missed late core_mhz`):
   the C2 enable wait). A protocol line follows (`PROG_EMU pic entries=.. bad_cmds=.. ...`).
 - `crc`: the CRC32 (zlib's) of every memory, in the byte layout of the table above, to compare with
   the image's.
+
+`PROG_EMU updi_dbg` (UPDI only): how often the chip went back to waiting for a SYNC (`hunts`), SYNCs refused by
+the enable window (`gate_rejects`), SYNC edge patterns thrown away (`interval_resets`, `bad_brr`, `bad_low`),
+`tx_bursts` (replies started), bad frames dropped, and the last bytes received (`last_rx`, newest first). The
+UPDI protocol line counts replies by frame type (`tx_ldcs`, `tx_lds`, `tx_ld`, `tx_ptr`, `tx_sib`, `tx_ack`).
 
 `PROG_EMU updi_gap_us` (UPDI only): for the enable pulse and for the BREAK, how many there were and the
 gap in us from the end of the low (its rising edge) to the first edge of the next SYNC (min, max, last), plus the

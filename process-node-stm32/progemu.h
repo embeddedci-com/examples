@@ -55,6 +55,7 @@ typedef struct {
     void      (*edge)(int clk, int pod);
     int       (*drive)(void);          /* what the chip drives on data now: 0, 1, or -1 (released) */
     void      (*nrst)(int low);        /* reset pin changed */
+    const uint8_t *data_want;          /* optional: nonzero while the data-line interrupt is needed */
     void      (*data)(int level);      /* optional: the pod changed data while not driven by the chip (EXTI on PB12) */
     /* UPDI: the host side calls these */
     void      (*rx)(uint8_t b);        /* a byte after SYNC */

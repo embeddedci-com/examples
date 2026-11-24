@@ -240,6 +240,9 @@ def test_erase_chip_and_flash(emu, case_name):
     report(case_name, "flash", stat)
     assert int(stat["crc"]["flash"], 16) == zlib.crc32(img), \
         f"flash CRC {stat['crc']['flash']} != image {zlib.crc32(img):08x}"
+    if not case.get("uart"):
+        assert int(stat["stat"]["missed"]) == 0 and int(stat["stat"]["late"]) == 0, \
+            f"the node missed edges, the pod is faster than the emulator can follow: {stat['stat']['_line']}"
     assert int(stat["stat"]["frames"]) > 0
     assert int(stat["stat"]["edges"]) > 0 or case.get("uart")
     # the hard protocol errors (bad frames, early commands); timing waits are reported, not failed

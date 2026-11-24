@@ -49,7 +49,7 @@ typedef struct {
     uint8_t lowtmp;
     /* PDI physical layer: enable timing, the ~10 kHz turn-off, the bus-off time of a chip erase */
     int prev_pod;
-    uint8_t en_arm, en_ok, erase_on;
+    uint8_t en_arm, en_ok, erase_on, want_data;
     uint32_t en_t, last_rise, erase_until;
     uint32_t dropouts, breaks;
     uint32_t frames_rx, parity_bad, bad_key, enables, early_nvm;
@@ -266,6 +266,7 @@ static void drop_pdi(void)                      /* clock slower than ~10 kHz: th
     xm_t *t = &X;
     if (t->enabled) t->dropouts++;
     t->enabled = t->nvmen = 0;
+    t->want_data = 1;
     t->cs_status = t->cs_reset = 0;
     t->inframe = 0; t->need = 0; t->reps = 0; t->outn = t->outi = 0; t->cur = -1; t->idle1 = 0;
 }
@@ -313,7 +314,7 @@ static void edge(int clk, int pod)
                 else
                 {
                     t->inframe = 1; t->rxn = 0; t->rxv = 0;
-                    if (!t->enabled && t->idle1 >= 16 && t->en_ok) { t->enabled = 1; t->enables++; }
+                    if (!t->enabled && t->idle1 >= 16 && t->en_ok) { t->enabled = 1; t->enables++; t->want_data = 0; }
                     t->en_ok = 0;
                     t->idle1 = 0;
                 }
@@ -353,7 +354,7 @@ static void init(void)
     memset(t->fuse, 0xFF, sizeof t->fuse);
     memset(t->buf, 0xFF, sizeof t->buf);
     memset(t->ebuf, 0xFF, sizeof t->ebuf);
-    t->lock = 0xFF; t->cur = -1; t->prev_clk = 1; t->prev_pod = -1;
+    t->lock = 0xFF; t->cur = -1; t->prev_clk = 1; t->prev_pod = -1; t->want_data = 1;
     memset(&s_counts, 0, sizeof s_counts);
 }
 
@@ -410,5 +411,5 @@ static const pe_mem_t k_mem[] = {
 const pe_chip_t pe_pdi = {
     .name = "pdi", .what = "AVR XMEGA PDI: 20 KB flash (128-byte pages), 1 KB EEPROM, id 1e9441",
     .uart = 0, .reset = 0, .init = init, .lock = do_lock, .stat = stat, .counts = counts,
-    .mem = k_mem, .nmem = 4, .edge = edge, .drive = drive, .data = data_edge,
+    .mem = k_mem, .nmem = 4, .edge = edge, .drive = drive, .data = data_edge, .data_want = &((xm_t *)(void *)pe_pool)->want_data,
 };

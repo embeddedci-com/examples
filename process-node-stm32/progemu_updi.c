@@ -66,6 +66,7 @@ typedef struct {
     /* counters */
     uint32_t frames, bad_access, bad_frame, breaks, keys, chip_erases, resets;
     uint32_t st_words, st_bytes;
+    uint32_t tx_ldcs, tx_lds, tx_ld, tx_sib, tx_ack, tx_ptr;     /* replies by frame type */
 } chip_t;
 
 _Static_assert(sizeof(chip_t) <= PE_POOL_BYTES, "updi state");
@@ -89,7 +90,7 @@ static int store_while_busy(void)
 }
 
 static void reply(const uint8_t *b, size_t n) { pe_updi_tx(b, (unsigned)n); }
-static void ack(void) { uint8_t a = 0x40; reply(&a, 1); }
+static void ack(void) { uint8_t a = 0x40; C.tx_ack++; reply(&a, 1); }
 
 static reg_t *find(uint32_t addr, uint32_t *off)
 {
@@ -283,6 +284,7 @@ static void args_done(void)
         for (unsigned i = 0; i < asz; i++) a |= (uint32_t)c->arg[i] << (8 * i);
         uint8_t o[4];
         for (unsigned i = 0; i < dsz; i++) o[i] = mrd(a + i);
+        c->tx_lds++;
         reply(o, dsz);
         c->ps = P_SYNC;
         break;
@@ -366,6 +368,7 @@ static void decode_op(void)
         if (mode == 2)
         {
             uint8_t o[3] = { (uint8_t)c->ptr, (uint8_t)(c->ptr >> 8), (uint8_t)(c->ptr >> 16) };
+            c->tx_ptr++;
             reply(o, dsz);
             break;
         }
@@ -373,6 +376,7 @@ static void decode_op(void)
         {
             uint8_t o[4];
             for (unsigned i = 0; i < dsz; i++) o[i] = mrd(c->ptr + i);
+            c->tx_ld++;
             reply(o, dsz);
             if (mode == 1) c->ptr += dsz;
         }
@@ -394,13 +398,14 @@ static void decode_op(void)
         unsigned reg = op & 15;
         uint8_t v = c->cs[reg];
         if (reg == 0x0B) v = (uint8_t)((c->locked ? 1 : 0) | ((c->prog && (int32_t)(pe_now - c->prog_at) >= 0) ? 8 : 0));
+        c->tx_ldcs++;
         reply(&v, 1);
         break;
     }
     case 0xC: c->cls = C_STCS; c->need = 1; c->ps = P_ARGS; break;
     case 0xA: c->cls = C_RPT; c->need = 1; c->ps = P_ARGS; break;
     case 0xE:
-        if (op & 4) reply((const uint8_t *)c->sib, 16);
+        if (op & 4) { c->tx_sib++; reply((const uint8_t *)c->sib, 16); }
         else { c->cls = C_KEY; c->need = 8u << (op & 3); c->ps = P_ARGS; }
         break;
     default: c->bad_frame++;
@@ -547,11 +552,13 @@ static const pe_counts_t *counts(void)
 static void stat(void)
 {
     printf("PROG_EMU updi nvm=%d frames=%lu bad_frame=%lu bad_access=%lu breaks=%lu keys=%lu "
-           "chip_erases=%lu resets=%lu st_words=%lu st_bytes=%lu pulses=%lu timing_viol=%lu drops=%lu locked=%u prog=%u\r\n",
+           "chip_erases=%lu resets=%lu st_words=%lu st_bytes=%lu pulses=%lu timing_viol=%lu drops=%lu locked=%u prog=%u tx_ldcs=%lu tx_lds=%lu tx_ld=%lu tx_ptr=%lu tx_sib=%lu tx_ack=%lu\r\n",
            C.nvm, (unsigned long)C.frames, (unsigned long)C.bad_frame, (unsigned long)C.bad_access,
            (unsigned long)C.breaks, (unsigned long)C.keys, (unsigned long)C.chip_erases,
            (unsigned long)C.resets, (unsigned long)C.st_words, (unsigned long)C.st_bytes,
-           (unsigned long)C.pulses, (unsigned long)C.timing_viol, (unsigned long)C.drops, C.locked, C.prog);
+           (unsigned long)C.pulses, (unsigned long)C.timing_viol, (unsigned long)C.drops, C.locked, C.prog,
+           (unsigned long)C.tx_ldcs, (unsigned long)C.tx_lds, (unsigned long)C.tx_ld, (unsigned long)C.tx_ptr,
+           (unsigned long)C.tx_sib, (unsigned long)C.tx_ack);
 }
 
 static void rd_flash(uint32_t a, uint8_t *b, uint32_t n)
