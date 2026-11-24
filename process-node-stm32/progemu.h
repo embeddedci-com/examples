@@ -25,6 +25,14 @@ extern uint32_t pe_cyc_us;
 #define PE_POOL_BYTES 24576U
 extern uint32_t pe_pool[PE_POOL_BYTES / 4U];
 
+/* Deferred memory fills. A model that must clear a large region from the edge handler (an erase)
+   calls these; progemu.c queues the work and does it in slices while the polling loop idles between
+   edges, so a 20 KB erase does not make the handler late. The host harness fills at once. A model
+   counts the chip as busy while pe_fill_pending() is nonzero. */
+void pe_fill8(uint8_t *p, uint8_t v, uint32_t n);
+void pe_fill16(uint16_t *p, uint16_t v, uint32_t n);
+int  pe_fill_pending(void);
+
 /* One emulated memory: its size and a reader (dump, CRC32). */
 typedef struct {
     const char *name;
@@ -54,6 +62,9 @@ typedef struct {
        does not drive (the chip does, or nobody: a pull-up holds 1) */
     void      (*edge)(int clk, int pod);
     int       (*drive)(void);          /* what the chip drives on data now: 0, 1, or -1 (released) */
+    /* two-wire, optional: what the chip will drive once the clock goes to `clk`, assuming the pod does
+       nothing else (the pin is switched to it before the model runs, to meet the chip's data valid time) */
+    int       (*peek)(int clk);
     void      (*nrst)(int low);        /* reset pin changed */
     const uint8_t *data_want;          /* optional: nonzero while the data-line interrupt is needed */
     void      (*data)(int level);      /* optional: the pod changed data while not driven by the chip (EXTI on PB12) */

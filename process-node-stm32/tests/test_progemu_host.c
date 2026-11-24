@@ -37,6 +37,11 @@ static prog_sim_t *g_sim;
 static uint32_t g_edges;
 static int g_prev_clk = 1;
 
+void pe_fill8(uint8_t *p, uint8_t v, uint32_t n) { memset(p, v, n); }
+void pe_fill16(uint16_t *p, uint16_t v, uint32_t n) { for (uint32_t i = 0; i < n; i++) p[i] = v; }
+int pe_fill_pending(void) { return 0; }
+static unsigned g_peek_miss, g_peek_n;
+
 void pe_updi_hold(uint32_t until)
 {
     if ((int32_t)(until - pe_now) > 0) pe_now = until;
@@ -59,7 +64,13 @@ static void a_on_pins(prog_sim_t *s, int clk, int pod)
     }
     g_prev_clk = clk;
     g_edges++;
+    int pk = g_chip->peek != NULL ? g_chip->peek(clk) : 0;
     g_chip->edge(clk, pod);
+    if (g_chip->peek != NULL)
+    {
+        g_peek_n++;
+        if (pk != g_chip->drive()) g_peek_miss++;      /* the pin was switched to the wrong level first */
+    }
 }
 
 static int a_chip_data(prog_sim_t *s)
@@ -191,6 +202,7 @@ static rig_t *rig_new(const tcase_t *tc)
     g_chip = tc->chip;
     g_sim = &r->sim;
     g_edges = 0;
+    g_peek_miss = g_peek_n = 0;
     g_prev_clk = 1;
     tc->chip->init();
     prog_sim_init(&r->sim, &r->ops, &k_model, NULL);
@@ -276,6 +288,8 @@ static void test_flow(const tcase_t *tc)
     }
     free(mb);
     CHECK(r->sim.contention == 0);
+    printf("  %-6s peek vs drive: %u of %u edges differ\n", tc->name, g_peek_miss, g_peek_n);
+    CHECK(g_peek_miss * 1000U <= g_peek_n);
     report("flow", tc, r);
     free(r);
 }

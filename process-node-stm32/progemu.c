@@ -131,6 +131,8 @@ static const pe_chip_t *volatile s_chip;   /* NULL: stopped */
 #define UPDI_LINE  (1UL << 10)    /* PC10 */
 
 static uint8_t s_data_on;
+static uint32_t s_chg_t;
+static uint8_t s_chg;
 static volatile int s_drv = -1;   /* what PB12 is driven to: 0, 1, or -1 released */
 
 static inline void drive_data(int d)
@@ -140,6 +142,8 @@ static inline void drive_data(int d)
         return;
     }
     s_drv = d;
+    s_chg_t = DWT->CYCCNT;
+    s_chg = 1U;
     if (d < 0)
     {
         GPIOB->MODER &= ~(3UL << 24);
@@ -167,9 +171,72 @@ static gap_t s_hi, s_lo;               /* high time (rise to fall) and low time 
 static uint32_t s_last_t, s_burst_cyc;
 static int s_prev_clk, s_first;
 
+/* deferred fills (progemu.h) */
+typedef struct { void *p; uint32_t n; uint16_t v; uint8_t w; } fill_t;
+#define FILLQ 8U
+static fill_t s_fq[FILLQ];
+static volatile uint32_t s_fq_h, s_fq_t;
+static volatile uint8_t s_defer;
+
+static void fill_do(void *p, uint32_t n, uint16_t v, uint8_t w)
+{
+    if (w == 1U)
+    {
+        memset(p, (int)v, n);
+    }
+    else
+    {
+        uint16_t *q = p;
+        for (uint32_t i = 0; i < n; i++) q[i] = v;
+    }
+}
+
+static void fill_put(void *p, uint32_t n, uint16_t v, uint8_t w)
+{
+    if (!s_defer || s_fq_t - s_fq_h >= FILLQ)
+    {
+        fill_do(p, n, v, w);
+        return;
+    }
+    fill_t *f = &s_fq[s_fq_t % FILLQ];
+    f->p = p; f->n = n; f->v = v; f->w = w;
+    s_fq_t++;
+}
+
+void pe_fill8(uint8_t *p, uint8_t v, uint32_t n) { fill_put(p, n, v, 1U); }
+void pe_fill16(uint16_t *p, uint16_t v, uint32_t n) { fill_put(p, n, v, 2U); }
+int pe_fill_pending(void) { return s_fq_t != s_fq_h; }
+
+/* one slice (64 elements) of the oldest fill */
+static void fill_step(void)
+{
+    fill_t *f = &s_fq[s_fq_h % FILLQ];
+    uint32_t n = f->n < 64U ? f->n : 64U;
+    fill_do(f->p, n, f->v, f->w);
+    f->p = (uint8_t *)f->p + n * f->w;
+    f->n -= n;
+    if (f->n == 0U)
+    {
+        s_fq_h++;
+    }
+}
+
+static void fill_flush(void)
+{
+    while (s_fq_t != s_fq_h)
+    {
+        fill_step();
+    }
+}
+
+static uint32_t s_trn, s_evn, s_poll_entries, s_react_max, s_react_sum, s_react_n, s_proc_max, s_proc_sum, s_proc_n;
+
+
 static void stats_reset(void)
 {
     s_edges = s_rise = s_fall = s_missed = s_late = s_nrst_edges = 0U;
+    s_trn = s_evn = 0U;
+    s_poll_entries = s_react_max = s_react_sum = s_react_n = s_proc_max = s_proc_sum = s_proc_n = 0U;
     memset(&s_hi, 0, sizeof s_hi);
     memset(&s_lo, 0, sizeof s_lo);
     s_hi.min = s_lo.min = 0xFFFFFFFFU;
@@ -189,6 +256,34 @@ static inline void gap_add(gap_t *g, uint32_t dt)
         g->n++;
     }
 }
+
+/* ---------------------------------------------------------------- trace */
+
+/* Two-wire: the first 512 clock edges with the data level read at the edge, what the chip drove
+   before and after the model ran, and the reaction time (edge noticed -> PB12 written). UPDI: the
+   last 256 decisions (bytes in, what the chip decided, bytes out). `prog_emu trace`. */
+#define TRC_N 512U
+typedef struct { uint32_t t; uint16_t react, proc; uint8_t fl; } trc_t;
+static trc_t s_trc[TRC_N];
+
+enum { E_RX = 1, E_BADRX, E_SYNCBYTE, E_PULSEBYTE, E_BREAKFE, E_HUNT, E_FRAMEIN, E_TXSTART, E_TXB, E_TC,
+       E_SYNCEDGE, E_BREAKEDGE, E_PULSEEDGE, E_GATEREJ, E_IVAL, E_BADLOW, E_RXON };
+typedef struct { uint32_t t; uint8_t type, x; uint16_t y; } ev_t;
+#define EV_N 256U
+static ev_t s_ev[EV_N];
+
+static inline void ev(uint8_t type, uint8_t x, uint16_t y)
+{
+    ev_t *e = &s_ev[s_evn++ & (EV_N - 1U)];
+    e->t = DWT->CYCCNT;
+    e->type = type;
+    e->x = x;
+    e->y = y;
+}
+
+static const char *const k_evname[] = {
+    "?", "rx", "rx_bad", "sync_byte", "pulse_byte", "break_fe", "hunt", "model", "tx_start", "tx_byte", "tx_done",
+    "sync_edge", "break_edge", "pulse_edge", "gate_reject", "interval_reset", "bad_low", "rx_on" };
 
 /* ---------------------------------------------------------------- UPDI (USART3, PC10) */
 
@@ -246,6 +341,7 @@ static void updi_hunt(void)
     s_nf = 0U;
     s_pend = 0U;
     d_hunts++;
+    ev(E_HUNT, 0, 0);
     EXTI->PR = UPDI_LINE;
     EXTI->IMR |= UPDI_LINE;
     s_umode = U_HUNT;
@@ -279,6 +375,7 @@ static void updi_next(uint32_t t_rx)
         {
         }
         d_bursts++;
+        ev(E_TXSTART, (uint8_t)s_holdv, (uint16_t)((s_txh - s_txt) % TXR));
         USART3->CR1 = (USART3->CR1 & ~USART_CR1_RE) | USART_CR1_TXEIE;
         s_umode = U_TX;
     }
@@ -316,6 +413,7 @@ static void updi_edge(uint32_t t, int lvl)
             if (!c->sync_gate())          /* disabled, or a SYNC outside its window: not taken */
             {
                 d_gate_rej++;
+                ev(E_GATEREJ, 0, 0);
                 s_fall_t = t;
                 return;
             }
@@ -326,6 +424,7 @@ static void updi_edge(uint32_t t, int lvl)
             if (d < ref - ref / 4U || d > ref + ref / 4U)
             {
                 d_ival++;
+                ev(E_IVAL, 0, 0);
                 s_nf = 0U;
             }
         }
@@ -346,6 +445,7 @@ static void updi_edge(uint32_t t, int lvl)
                 s_brr_last = brr;
                 s_bit_cyc = b;
                 s_pend = 1U;
+                ev(E_SYNCEDGE, 0, (uint16_t)brr);
             }
             else
             {
@@ -362,6 +462,7 @@ static void updi_edge(uint32_t t, int lvl)
         s_breaks++;
         s_ev_kind = 1;
         s_ev_end = t;
+        ev(E_BREAKEDGE, 0, (uint16_t)(low / (pe_cyc_us * 10U)));       /* in 10 us */
         s_gap[1].low_last = low;
         if (low > s_gap[1].low_max) s_gap[1].low_max = low;
         s_nf = 0U;
@@ -377,6 +478,7 @@ static void updi_edge(uint32_t t, int lvl)
             s_nf = 0U;
             s_ev_kind = 0;
             s_ev_end = t;
+            ev(E_PULSEEDGE, 0, (uint16_t)(low / pe_cyc_us));
             s_gap[0].low_last = low;
             if (low > s_gap[0].low_max) s_gap[0].low_max = low;
             pe_now = t;
@@ -389,6 +491,7 @@ static void updi_edge(uint32_t t, int lvl)
     {
         s_bad_sync++;                          /* not the SYNC's last two low bits */
         d_bad_low++;
+        ev(E_BADLOW, 0, (uint16_t)(low / pe_cyc_us));
         s_nf = 0U;
         return;
     }
@@ -399,6 +502,7 @@ static void updi_edge(uint32_t t, int lvl)
     s_nf = 0U;
     pe_now = t;
     c->sync();
+    ev(E_RXON, 0, 0);
     EXTI->IMR &= ~UPDI_LINE;
     USART3->CR1 |= USART_CR1_RE;
     s_umode = U_RX;
@@ -424,15 +528,18 @@ int progemu_usart3_irq(void)
         {
             s_u_rx++;
             s_lastrx[s_nlast++ & 7U] = b;
+            ev(E_RX, b, (uint16_t)sr);
             uint32_t bitc = s_bit_cyc;
             if ((sr & USART_SR_FE) && b == 0U)
             {
+                ev(E_BREAKFE, 0, 0);
                 /* BREAK: the low goes on, the rising edge (EXTI) says when it ends */
                 s_fall_t = t - 10U * bitc;
                 updi_hunt();
             }
             else if (sr & (USART_SR_FE | USART_SR_PE | USART_SR_NE))
             {
+                ev(E_BADRX, b, (uint16_t)sr);
                 d_err_drop++;                  /* a bad frame is not taken; the pod times out and breaks */
                 d_last_sr = sr;
                 if (c->want_sync())
@@ -449,7 +556,9 @@ int progemu_usart3_irq(void)
                     uint32_t start = t - (bitc * 21U) / 2U;       /* its start bit, 10.5 bits ago */
                     gap_note(start);
                     pe_now = start;
-                    if (c->sync_gate())
+                    int ok = c->sync_gate();
+                    ev(E_SYNCBYTE, b, (uint16_t)ok);
+                    if (ok)
                     {
                         c->sync();
                         s_sync_n++;
@@ -466,6 +575,7 @@ int progemu_usart3_irq(void)
                     s_ev_kind = 0;
                     s_ev_end = pe_now;
                     s_gap[0].low_last = 10U * bitc;
+                    ev(E_PULSEBYTE, b, 0);
                     c->pulse();
                 }
                 else
@@ -477,7 +587,9 @@ int progemu_usart3_irq(void)
             else
             {
                 pe_now = t;
+                uint32_t f0 = c->counts()->frames;
                 c->rx(b);
+                ev(E_FRAMEIN, (uint8_t)(c->counts()->frames - f0), (uint16_t)((s_txh - s_txt) % TXR));
                 updi_next(t);
             }
         }
@@ -488,6 +600,7 @@ int progemu_usart3_irq(void)
     {
         if (s_txt != s_txh)
         {
+            ev(E_TXB, s_txr[s_txt], 0);
             USART3->DR = s_txr[s_txt];
             s_txt = (uint16_t)((s_txt + 1U) % TXR);
             s_u_tx++;
@@ -501,6 +614,7 @@ int progemu_usart3_irq(void)
     {
         USART3->CR1 = cr1 & ~USART_CR1_TCIE;
         USART3->SR = ~USART_SR_TC;
+        ev(E_TC, 0, 0);
         updi_rx_on();
     }
     return 1;
@@ -569,34 +683,57 @@ static void updi_stop(void)
    the previous one is still handled is counted (`late`), a pending bit whose level did not change
    (two edges between two looks) is `missed`. Other interrupts wait while the loop runs; the
    watchdog is kicked from it. */
-static uint32_t s_lines;                 /* the lines the loop watches */
+static uint32_t s_lines;                 /* the lines the loop watches (EXTI mask bits = GPIOB pin bits) */
 static int s_prev_rst;
+static uint32_t s_prev_idr;              /* the watched pin levels as of the last edge handled */
+static int s_pv;                         /* what the chip will drive after the next edge (peek) */
 
 static void pe_poll(const pe_chip_t *c)
 {
+    s_poll_entries++;
     uint32_t idle_t = DWT->CYCCNT;
     const uint32_t idle_lim = 100U * pe_cyc_us;
     uint32_t spin = 0U, n = 0U;
+    uint32_t prev = s_prev_idr;
+    s_defer = 1U;
     for (;;)
     {
-        uint32_t pr = EXTI->PR & s_lines;
-        if (pr == 0U)
+        uint32_t lines = s_lines;
+        uint32_t idr = GPIOB->IDR;
+        uint32_t ch = (idr ^ prev) & lines;
+        if (ch == 0U)
         {
+            if (s_fq_t != s_fq_h)
+            {
+                fill_step();                       /* a big erase, a slice at a time, between edges */
+                continue;
+            }
             if (DWT->CYCCNT - idle_t > idle_lim)
             {
-                return;
+                /* quiet: leave, unless an edge slipped in between the last look and the pending-bit
+                   clear (a later one sets the bit again and wakes the interrupt) */
+                EXTI->PR = lines;
+                if (((GPIOB->IDR ^ prev) & lines) == 0U)
+                {
+                    break;
+                }
+                continue;
             }
-            if ((++spin & 0xFFU) == 0U)
+            if ((++spin & 0x3FFU) == 0U)
             {
                 IWDG->KR = 0xAAAAU;
             }
             continue;
         }
         uint32_t t = DWT->CYCCNT;
-        uint32_t idr = GPIOB->IDR;
-        EXTI->PR = pr;
+        prev = (prev & ~ch) | (idr & ch);
         idle_t = t;
-        if (pr & RST_LINE)
+        /* the pin first, from what the chip was going to drive after this edge, then the model */
+        if ((ch & CLK_LINE) && s_pv != s_drv)
+        {
+            drive_data(s_pv);
+        }
+        if (ch & RST_LINE)
         {
             int low = (int)((idr & 1U) == 0U);
             if (low != s_prev_rst)
@@ -608,29 +745,27 @@ static void pe_poll(const pe_chip_t *c)
                 s_nrst_edges++;
             }
         }
-        if ((pr & DATA_LINE) && c->data != NULL && s_drv < 0)
+        if ((ch & DATA_LINE) && c->data != NULL && s_drv < 0)
         {
             pe_now = t;
             c->data((int)((idr >> 12) & 1U));
         }
-        if (pr & CLK_LINE)
+        if (ch & CLK_LINE)
         {
             int clk = (int)((idr >> 14) & 1U);
-            if (clk == s_prev_clk)
-            {
-                s_missed++;        /* both edges came between two looks: a pulse we could not follow */
-            }
-            else
+            if (clk != s_prev_clk)
             {
                 s_prev_clk = clk;
                 pe_now = t;
+                int before = s_drv;
+                s_chg = 0U;
                 c->edge(clk, s_drv >= 0 ? -1 : (int)((idr >> 12) & 1U));
                 drive_data(c->drive());
                 if (c->data_want != NULL && (*c->data_want != 0U) != s_data_on)
                 {
                     s_data_on = *c->data_want != 0U;
-                    if (s_data_on) { EXTI->PR = DATA_LINE; EXTI->IMR |= DATA_LINE; s_lines |= DATA_LINE; }
-                    else { EXTI->IMR &= ~DATA_LINE; s_lines &= ~DATA_LINE; }
+                    if (s_data_on) { s_lines |= DATA_LINE; prev = (prev & ~DATA_LINE) | (GPIOB->IDR & DATA_LINE); }
+                    else s_lines &= ~DATA_LINE;
                 }
                 s_edges++;
                 if (clk) s_rise++; else s_fall++;
@@ -643,17 +778,42 @@ static void pe_poll(const pe_chip_t *c)
                     gap_add(clk ? &s_lo : &s_hi, t - s_last_t);
                 }
                 s_last_t = t;
-            }
-            if (EXTI->PR & CLK_LINE)
-            {
-                s_late++;          /* the next edge came while this one was handled */
+                uint32_t proc = DWT->CYCCNT - t;
+                if (s_trn < TRC_N)
+                {
+                    trc_t *e = &s_trc[s_trn++];
+                    e->t = t;
+                    e->react = s_chg ? (uint16_t)(s_chg_t - t) : 0xFFFFU;
+                    e->proc = proc > 0xFFFFU ? 0xFFFFU : (uint16_t)proc;
+                    e->fl = (uint8_t)(clk | (((idr >> 12) & 1U) << 1) | ((uint32_t)(before + 1) << 2) |
+                                      ((uint32_t)(s_drv + 1) << 4));
+                }
+                if (s_chg)
+                {
+                    uint32_t r = s_chg_t - t;
+                    if (r > s_react_max) s_react_max = r;
+                    s_react_sum += r;
+                    s_react_n++;
+                }
+                if (proc > s_proc_max) s_proc_max = proc;
+                s_proc_sum += proc;
+                s_proc_n++;
+                /* an edge that came while this one was handled */
+                if (((GPIOB->IDR ^ prev) & CLK_LINE) != 0U)
+                {
+                    s_late++;
+                }
             }
         }
+        s_pv = c->peek != NULL ? c->peek(s_prev_clk ? 0 : 1) : c->drive();
         if ((++n & 0x3FU) == 0U)
         {
             IWDG->KR = 0xAAAAU;
         }
     }
+    s_prev_idr = prev;
+    s_defer = 0U;
+    fill_flush();
 }
 
 void EXTI15_10_IRQHandler(void)
@@ -717,6 +877,9 @@ static void wires_start(const pe_chip_t *c)
         EXTI->IMR |= DATA_LINE;
         s_data_on = 1U;
     }
+    s_prev_idr = GPIOB->IDR & (CLK_LINE | RST_LINE | DATA_LINE);
+    s_pv = -1;
+    s_fq_h = s_fq_t = 0U;
     s_lines = CLK_LINE | (c->reset ? RST_LINE : 0U) | (c->data != NULL ? DATA_LINE : 0U);
     s_prev_clk = (int)((GPIOB->IDR >> 14) & 1U);
     EXTI->PR = CLK_LINE;
@@ -903,6 +1066,11 @@ static void print_stat(void)
         {
             printf("PROG_EMU timing_valid=1 missed=0 late=0\r\n");
         }
+        printf("PROG_EMU poll entries=%lu pin_changes=%lu react_ns_max=%lu react_ns_avg=%lu proc_ns_max=%lu proc_ns_avg=%lu "
+               "(react: edge noticed -> PB12 changed; proc: edge noticed -> handled)\r\n",
+               (unsigned long)s_poll_entries, (unsigned long)s_react_n, ns_of(s_react_max),
+               s_react_n ? ns_of(s_react_sum / s_react_n) : 0UL, ns_of(s_proc_max),
+               s_proc_n ? ns_of(s_proc_sum / s_proc_n) : 0UL);
         print_gap("high", &s_hi);
         print_gap("low", &s_lo);
         print_bins("high", &s_hi);
@@ -1000,6 +1168,44 @@ static void print_dump(const pe_chip_t *c, const char *mem, uint32_t addr, uint3
     }
 }
 
+static void print_trace(uint32_t from, uint32_t count)
+{
+    const pe_chip_t *c = s_chip;
+    if (c == NULL)
+    {
+        printf("PROG_EMU err not running\r\n");
+        return;
+    }
+    if (c->uart)
+    {
+        uint32_t n = s_evn < EV_N ? s_evn : EV_N, first = s_evn - n;
+        printf("PROG_EMU trace updi events=%lu shown=%lu (t_us from the first shown; rx x=byte y=USART SR; "
+               "model x=frames decoded y=reply bytes queued; sync_byte x=byte y=taken; tx_start x=held)\r\n",
+               (unsigned long)s_evn, (unsigned long)n);
+        uint32_t t0 = n ? s_ev[first & (EV_N - 1U)].t : 0U;
+        for (uint32_t i = from; i < n && i < from + count; i++)
+        {
+            const ev_t *e = &s_ev[(first + i) & (EV_N - 1U)];
+            printf("%3lu %9lu %-15s x=%02x y=%04x\r\n", (unsigned long)i, (unsigned long)((e->t - t0) / pe_cyc_us),
+                   e->type < sizeof k_evname / sizeof k_evname[0] ? k_evname[e->type] : "?", e->x, e->y);
+        }
+        return;
+    }
+    printf("PROG_EMU trace wire edges=%lu (first %u; t_ns from the first edge, dt_ns since the previous; "
+           "clk level after the edge; data = line level read at the edge; drv before>after: - chip released, "
+           "0/1 chip drives; react_ns edge noticed -> PB12 changed (0: no change); proc_ns edge noticed -> handled)\r\n",
+           (unsigned long)s_trn, (unsigned)TRC_N);
+    for (uint32_t i = from; i < s_trn && i < from + count; i++)
+    {
+        const trc_t *e = &s_trc[i];
+        uint32_t t0 = s_trc[0].t, dt = i ? e->t - s_trc[i - 1U].t : 0U;
+        int b = (int)((e->fl >> 2) & 3U) - 1, a = (int)((e->fl >> 4) & 3U) - 1;
+        printf("%3lu %9lu %6lu c%u d%u %c>%c %5lu %5lu\r\n", (unsigned long)i, ns_of(e->t - t0), ns_of(dt), e->fl & 1U,
+               (e->fl >> 1) & 1U, b < 0 ? '-' : '0' + b, a < 0 ? '-' : '0' + a,
+               e->react == 0xFFFFU ? 0UL : ns_of(e->react), ns_of(e->proc));
+    }
+}
+
 static void clear_counters(void)
 {
     stats_reset();
@@ -1017,7 +1223,7 @@ static void clear_counters(void)
 void progemu_help(void)
 {
     printf("  prog_emu <updi|updi2|updimega|pic|pic8|pic18|pic18q10|c2|c2early|tpi|tpi20|tpi40|tpi104|pdi>   the NUCLEO answers as that chip (see README)\r\n");
-    printf("  prog_emu stop | stat | clear | lock | dump <mem> <addr> <len> | list\r\n");
+    printf("  prog_emu stop | stat | clear | lock | dump <mem> <addr> <len> | list | trace [arm | <from> [<count>]]\r\n");
 }
 
 int progemu_command(char *cmd)
@@ -1056,6 +1262,21 @@ int progemu_command(char *cmd)
         {
             clear_counters();
             printf("PROG_EMU ok cleared\r\n");
+        }
+        return 1;
+    }
+    if (strcmp(sub, "trace") == 0)
+    {
+        char *a = strtok(NULL, " ");
+        char *b = strtok(NULL, " ");
+        if (a != NULL && strcmp(a, "arm") == 0)
+        {
+            s_trn = s_evn = 0U;
+            printf("PROG_EMU ok trace armed\r\n");
+        }
+        else
+        {
+            print_trace(a ? (uint32_t)strtoul(a, NULL, 0) : 0U, b ? (uint32_t)strtoul(b, NULL, 0) : 512U);
         }
         return 1;
     }

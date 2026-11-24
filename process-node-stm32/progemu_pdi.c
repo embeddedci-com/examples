@@ -70,7 +70,7 @@ static int bus_off(void)
 
 static int is_busy(void)
 {
-    return X.busy && (int32_t)(X.busy_until - pe_now) > 0;
+    return (X.busy && (int32_t)(X.busy_until - pe_now) > 0) || pe_fill_pending();
 }
 
 static void set_busy(uint32_t us)
@@ -108,8 +108,8 @@ static void exec_ex(void)
     case 0x26: memset(t->buf, 0xFF, sizeof t->buf); break;
     case 0x36: memset(t->ebuf, 0xFF, sizeof t->ebuf); break;
     case 0x40:
-        memset(t->flash, 0xFF, sizeof t->flash);
-        memset(t->eeprom, 0xFF, sizeof t->eeprom);
+        pe_fill8(t->flash, 0xFF, sizeof t->flash);
+        pe_fill8(t->eeprom, 0xFF, sizeof t->eeprom);
         t->lock = 0xFF;
         set_busy(20000);
         t->erase_on = 1;
@@ -342,6 +342,12 @@ static void edge(int clk, int pod)
 
 static int drive(void) { return X.cur; }
 
+static int peek(int clk)
+{
+    if (clk == 0 && X.prev_clk == 1) return X.outi < X.outn ? X.out[X.outi] : -1;
+    return X.cur;
+}
+
 static pe_counts_t s_counts;
 
 static void init(void)
@@ -411,5 +417,5 @@ static const pe_mem_t k_mem[] = {
 const pe_chip_t pe_pdi = {
     .name = "pdi", .what = "AVR XMEGA PDI: 20 KB flash (128-byte pages), 1 KB EEPROM, id 1e9441",
     .uart = 0, .reset = 0, .init = init, .lock = do_lock, .stat = stat, .counts = counts,
-    .mem = k_mem, .nmem = 4, .edge = edge, .drive = drive, .data = data_edge, .data_want = &((xm_t *)(void *)pe_pool)->want_data,
+    .mem = k_mem, .nmem = 4, .edge = edge, .drive = drive, .peek = peek, .data = data_edge, .data_want = &((xm_t *)(void *)pe_pool)->want_data,
 };

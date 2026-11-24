@@ -58,6 +58,8 @@ typedef struct {
     uint8_t  last_page;
     uint8_t  out[300];
     unsigned nout, oh;
+    uint32_t rd_a;               /* a block read's data is taken from the flash as it is sent, not copied */
+    uint8_t  lazy;
 } c2m_t;
 
 _Static_assert(sizeof(c2m_t) <= PE_POOL_BYTES, "c2 state");
@@ -89,7 +91,7 @@ static int prepared(void)
 
 static int is_busy(void)
 {
-    return M.busy && (int32_t)(M.busy_until - pe_now) > 0;
+    return (M.busy && (int32_t)(M.busy_until - pe_now) > 0) || pe_fill_pending();
 }
 
 static void set_busy(uint32_t us)
@@ -107,6 +109,7 @@ static void fpi_byte(uint8_t b)
     {
     case F_IDLE:
         m->nout = m->oh = 0;
+        m->lazy = 0;
         switch (b)
         {
         case 0x02: out_push(0x0D); out_push(DERIV); break;
@@ -136,7 +139,7 @@ static void fpi_byte(uint8_t b)
             else
             {
                 m->erase_dev++;
-                memset(m->flash, 0xFF, sizeof m->flash);
+                pe_fill8(m->flash, 0xFF, sizeof m->flash);
                 m->locked = 0;
                 set_busy(30000);
                 out_push(0x0D);
@@ -152,7 +155,7 @@ static void fpi_byte(uint8_t b)
     case F_PAGE0:                 /* 0x00 starts the erase; the third status comes when it is done */
         m->fs = F_IDLE;
         m->erase_page++;
-        if ((m->last_page + 1u) * PAGE <= FLASH_SZ) memset(&m->flash[m->last_page * PAGE], 0xFF, PAGE);
+        if ((m->last_page + 1u) * PAGE <= FLASH_SZ) pe_fill8(&m->flash[m->last_page * PAGE], 0xFF, PAGE);
         set_busy(40000);
         out_push(0x0D);
         break;
@@ -168,13 +171,13 @@ static void fpi_byte(uint8_t b)
             uint32_t a = ((uint32_t)m->pbuf[0] << 8) | m->pbuf[1];
             uint32_t n = m->pbuf[2] ? m->pbuf[2] : 256u;
             m->nout = m->oh = 0;
+            m->lazy = 0;
             out_push(0x0D);
             if (m->fs == F_PARAMS_R)
             {
-                for (uint32_t i = 0; i < n; i++)
-                {
-                    out_push(a + i < FLASH_SZ ? m->flash[a + i] : 0xFF);
-                }
+                m->lazy = 1;
+                m->rd_a = a;
+                m->nout = 1U + n;
                 m->fs = F_IDLE;
             }
             else
@@ -197,6 +200,16 @@ static void fpi_byte(uint8_t b)
         }
         break;
     }
+}
+
+static uint8_t out_at(unsigned i)
+{
+    if (M.lazy && i >= 1U)
+    {
+        uint32_t a = M.rd_a + i - 1U;
+        return a < FLASH_SZ ? M.flash[a] : 0xFF;
+    }
+    return M.out[i];
 }
 
 static int out_ready(void) { return !is_busy() && M.oh < M.nout; }
@@ -246,6 +259,7 @@ static void chip_reset(void)
     m->fpctl_stage = 0;
     m->fs = F_IDLE;
     m->nout = m->oh = 0;
+    m->lazy = 0;
     m->busy = 0;
     m->enable_wait = 0;
     m->nsfr = 0;
@@ -326,7 +340,7 @@ static void rising(int bit)
             {
                 if (m->ar == 0) m->outv = DEVID;
                 else if (m->ar == 1) m->outv = REVID;
-                else if (m->ar == FPDAT_ADDR && m->oh < m->nout) m->outv = m->out[m->oh++];
+                else if (m->ar == FPDAT_ADDR && m->oh < m->nout) m->outv = out_at(m->oh++);
                 else m->outv = 0xFF;
                 m->st = S_DR;
             }
@@ -364,11 +378,22 @@ static void edge(int clk, int pod)
 }
 
 static int drive(void) { return M.drive; }
+static int peek(int clk)
+{
+    /* the next rising edge makes the chip drive what its state says (AN127 1.4) */
+    return clk == 1 ? drive_peek(0) : M.drive;
+}
 
 /* c2early: the value for the cycle the next rising edge starts is put on the wire during the
    preceding low phase, so a slow interrupt still has it there when the pod samples (the pod reads
    at least 120 ns after the rising edge). A pod that wrongly samples while the clock is low reads
    the new bit instead of the old one and goes unnoticed; use `c2` to catch that. */
+static int peek_early(int clk)
+{
+    if (clk == 0 && M.st == S_START) return M.drive;
+    return drive_peek(0);
+}
+
 static int drive_early(void)
 {
     if (M.prev_clk == 0 && M.st != S_START) return drive_peek(0);
@@ -420,11 +445,11 @@ static const pe_mem_t k_mem[] = { { "flash", FLASH_SZ, rd_flash } };
 const pe_chip_t pe_c2early = {
     .name = "c2early", .what = "Silicon Labs C2 as `c2`, data driven early (a slow interrupt still meets the pod's read), id 320321",
     .uart = 0, .reset = 0, .init = init, .lock = do_lock, .stat = stat, .counts = counts,
-    .mem = k_mem, .nmem = 1, .edge = edge, .drive = drive_early,
+    .mem = k_mem, .nmem = 1, .edge = edge, .drive = drive_early, .peek = peek_early,
 };
 
 const pe_chip_t pe_c2 = {
     .name = "c2", .what = "Silicon Labs C2, 8 KB flash, 512-byte pages, id 320321 (device 32 rev 03 derivative 21)",
     .uart = 0, .reset = 0, .init = init, .lock = do_lock, .stat = stat, .counts = counts,
-    .mem = k_mem, .nmem = 1, .edge = edge, .drive = drive,
+    .mem = k_mem, .nmem = 1, .edge = edge, .drive = drive, .peek = peek,
 };

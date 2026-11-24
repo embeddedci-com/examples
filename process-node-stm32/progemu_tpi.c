@@ -54,7 +54,7 @@ static int locked(void) { return (T.lock & 3u) != 3u; }
 
 static int is_busy(void)
 {
-    return T.busy && (int32_t)(T.busy_until - pe_now) > 0;
+    return (T.busy && (int32_t)(T.busy_until - pe_now) > 0) || pe_fill_pending();
 }
 
 static void set_busy(uint32_t us)
@@ -87,14 +87,14 @@ static void mem_write(uint16_t a, uint8_t v)
     if (t->nvmcmd != 0 && is_busy()) t->early_nvm++;
     if (t->nvmcmd == 0x10 && fl && (a & 1u))                 /* chip erase: dummy write to a high byte */
     {
-        memset(t->flash, 0xFF, sizeof t->flash);
+        pe_fill8(t->flash, 0xFF, sizeof t->flash);
         t->config = 0xFF;
         t->lock = 0xFF;
         set_busy(15000);
     }
     else if (t->nvmcmd == 0x14 && (a & 1u))                  /* section erase: the WHOLE section */
     {
-        if (fl) memset(t->flash, 0xFF, sizeof t->flash);
+        if (fl) pe_fill8(t->flash, 0xFF, sizeof t->flash);
         else t->config = 0xFF;
         set_busy(4000);
     }
@@ -241,6 +241,14 @@ static void edge(int clk, int pod)
 
 static int drive(void) { return T.nrst_low ? T.cur : -1; }
 
+/* the chip changes its output after the falling edge */
+static int peek(int clk)
+{
+    if (!T.nrst_low) return -1;
+    if (clk == 0 && T.prev_clk == 1) return T.outi < T.outn ? T.out[T.outi] : -1;
+    return T.cur;
+}
+
 static void on_nrst(int low)
 {
     tiny_t *t = &T;
@@ -314,7 +322,7 @@ static const pe_mem_t k_mem40[] = { { "flash", 4096, rd_flash }, { "config", 2, 
 
 #define TPI_CHIP(sym, nm, descr, ini, mems) \
     const pe_chip_t sym = { .name = nm, .what = descr, .uart = 0, .reset = 1, .init = ini, .lock = do_lock, \
-        .stat = stat, .counts = counts, .mem = mems, .nmem = 2, .edge = edge, .drive = drive, .nrst = on_nrst }
+        .stat = stat, .counts = counts, .mem = mems, .nmem = 2, .edge = edge, .drive = drive, .peek = peek, .nrst = on_nrst }
 
 TPI_CHIP(pe_tpi, "tpi", "AVR TPI, ATtiny10: 1 KB flash, one word a write, id 1e9003", init, k_mem);
 TPI_CHIP(pe_tpi20, "tpi20", "AVR TPI, ATtiny20: 2 KB flash, 2 words a write with IDLE between, id 1e910f", init20, k_mem20);

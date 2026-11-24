@@ -145,8 +145,8 @@ static void erase_page(int ri, uint32_t page)
 
 static void erase_flash_ee(void)
 {
-    memset(C.r[R_FLASH].d, 0xFF, C.r[R_FLASH].size);
-    memset(C.r[R_EE].d, 0xFF, C.r[R_EE].size);
+    pe_fill8(C.r[R_FLASH].d, 0xFF, C.r[R_FLASH].size);
+    pe_fill8(C.r[R_EE].d, 0xFF, C.r[R_EE].size);
     C.chip_erases++;
 }
 

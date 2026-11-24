@@ -310,11 +310,27 @@ TIM6 (its clock is twice PCLK1 while APB1 is divided; ARR is doubled) follow. 18
 per 2 us edge.
 
 **Polling, not one interrupt per edge.** For the two-wire chips the first edge of a burst wakes an interrupt
-(EXTI, priority 0), which then polls the EXTI pending bits of the clock, reset and data lines in a tight loop
-(about 20 cycles a look, edges timestamped with the cycle counter) until the pod has been quiet for 100 us, and
-returns. Other interrupts wait meanwhile (the console is not served during a burst; the watchdog is kicked from
-the loop). `late` counts an edge that arrived while the previous one was handled, `missed` a pending bit whose
-level had not changed (two edges between two looks).
+(EXTI, priority 0), which then watches GPIOB's clock, reset and data pins in a tight loop (a look every
+few cycles) until the pod has been quiet for 100 us, and returns. Other interrupts wait meanwhile (the console is
+not served during a burst; the watchdog is kicked from the loop). Three things keep the handler short:
+- **The pin moves first.** After each edge the chip model is asked (`peek`) what it will drive after the next
+  one; when that edge is noticed, PB12 is switched to it before the model runs (the model's own answer then
+  corrects it if the guess was wrong, which the host test counts and finds never). This is what meets a chip's
+  data-valid time after a clock edge: `react_ns` in `stat` is the time from noticing an edge to PB12 changing.
+- **Big erases are sliced.** A model that clears a flash image from the handler (device erase, chip erase) hands
+  it to `pe_fill8`/`pe_fill16`; the loop does it 64 elements at a time between edges, and the chip counts as
+  busy until it is done. C2 block reads are sent from the flash as the bytes go out instead of being copied
+  first. These inline loops were what made C2 and PDI handle some edges late.
+- **Statistics are cheap.** `proc_ns_max` and `proc_ns_avg` in `stat` are the time from noticing an edge to
+  having handled it; it must stay under the pod's shortest clock phase.
+`late` counts an edge that arrived while the previous one was handled (it is taken right after, with a late
+timestamp). `missed` stays 0 in this mode: the pod's phases are far longer than a look.
+
+**`prog_emu trace`.** Two-wire: the first 512 clock edges (`trace arm` starts a new window), one line each:
+index, `t_ns` from the first edge, `dt_ns` since the previous one, the clock level after the edge, the data
+level read at the edge, what the chip drove before and after (`-` released, `0`/`1` driven), `react_ns` and
+`proc_ns`. UPDI: the last 256 decisions in time order (a byte in with its USART status, SYNC taken or refused,
+the enable pulse, BREAK, the model decoding a frame and the reply bytes queued, the transmit and its end).
 
 **A run with missed edges is not a timing result.** If `missed` or `late` is not 0, `stat` prints
 `PROG_EMU WARNING timing_valid=0 ...` instead of `timing_valid=1`: edges were merged or taken late, the high and

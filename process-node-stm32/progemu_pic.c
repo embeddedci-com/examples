@@ -135,7 +135,7 @@ static unsigned step(uint32_t pc, int ds)
 static void erase_all(int cfg, int ee)
 {
     chip_t *c = &C;
-    for (unsigned i = 0; i < NW; i++) c->fl[i] = c->mask;
+    pe_fill16(c->fl, c->mask, NW);
     if (cfg)
     {
         for (unsigned i = 0; i < NCFG; i++) c->cfgw[i] = !c->byt ? 0x3FFF : c->kind == K_Q10 ? 0xFFFF : 0xFF;
@@ -232,7 +232,7 @@ static void bulk_erase(uint32_t d)
     if (c->kind == K_B18)                   /* payload: bit 0 EEPROM, 1 flash, 2 user ID, 3 config */
     {
         c->bulk_mask |= d;
-        if (d & 2) for (unsigned i = 0; i < NW; i++) c->fl[i] = 0xFFFF;
+        if (d & 2) pe_fill16(c->fl, 0xFFFF, NW);
         if (d & 4) for (unsigned i = 0; i < 16; i++) c->uid[i] = 0xFFFF;
         if (d & 8) for (unsigned i = 16; i < NCFG; i++) c->cfgw[i] = 0xFF;
         if (d & 1) for (unsigned i = 0; i < EESZ; i++) c->ee[i] = 0xFF;
@@ -243,7 +243,7 @@ static void bulk_erase(uint32_t d)
     {
         if (c->pc >= 0x300000 && c->pc < 0x300100)
         {
-            for (unsigned i = 0; i < NW; i++) c->fl[i] = 0xFFFF;
+            pe_fill16(c->fl, 0xFFFF, NW);
             for (unsigned i = 0; i < 16; i++) c->uid[i] = 0xFFFF;
             for (unsigned i = 16; i < NCFG; i++) c->cfgw[i] = 0xFFFF;
         }
@@ -411,6 +411,15 @@ static int drive(void)
     return C.prog && C.st == S_PR ? C.out : -1;
 }
 
+/* The rising edge drives the next bit of a read, the falling edge lets go. */
+static int peek(int clk)
+{
+    chip_t *c = &C;
+    if (!c->prog || c->st != S_PR || !c->nrst_low) return -1;
+    if (clk == 0) return -1;
+    return (int)((c->frame >> (c->set8 ? c->plen - 1 - c->k : c->k)) & 1U);
+}
+
 static void chip_init(int kind)
 {
     chip_t *c = &C;
@@ -510,7 +519,7 @@ static const pe_mem_t k_mem[] = {
 #define PIC_CHIP(sym, nm, descr, ini) \
     const pe_chip_t sym = { .name = nm, .what = descr, .uart = 0, .reset = 1, .init = ini, \
         .lock = do_lock, .stat = stat, .counts = counts, .mem = k_mem, \
-        .nmem = sizeof k_mem / sizeof k_mem[0], .edge = edge, .drive = drive, .nrst = on_nrst }
+        .nmem = sizeof k_mem / sizeof k_mem[0], .edge = edge, .drive = drive, .peek = peek, .nrst = on_nrst }
 
 PIC_CHIP(pe_pic, "pic", "PIC16F1xxx-like, 6-bit commands, key LSb first, id a4000200 (DEV 0a4 REV 02 in one word)", init_a);
 PIC_CHIP(pe_pic8, "pic8", "PIC16F18xxx-like, 8-bit commands, id b2300120 (device 30b2 rev 2001)", init_b16);
