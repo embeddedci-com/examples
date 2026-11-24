@@ -340,9 +340,16 @@ static void on_nrst(int low)
    high, so the bit is put on the wire as soon as the falling edge has let the previous one go: it is
    there when the pod looks, however late the interrupt is. The first bit (start bit, always 0, which
    the pod drops) still comes with the first rising edge. */
+static int read_bit_at(int k)
+{
+    int idx = k + pe_skew;                  /* pe_skew is 0 unless a diagnostic run asked for it */
+    if (idx < 0 || idx >= C.plen) return 0;
+    return (int)((C.frame >> (C.set8 ? C.plen - 1 - idx : idx)) & 1U);
+}
+
 static int read_bit(void)
 {
-    return (int)((C.frame >> (C.set8 ? C.plen - 1 - C.k : C.k)) & 1U);
+    return read_bit_at(C.k);
 }
 
 static void rise(void)
@@ -427,7 +434,7 @@ static int peek(int clk)
 {
     chip_t *c = &C;
     if (!c->prog || c->st != S_PR || !c->nrst_low) return -1;
-    if (clk == 0) return c->k + 1 < c->plen ? (int)((c->frame >> (c->set8 ? c->plen - 2 - c->k : c->k + 1)) & 1U) : -1;
+    if (clk == 0) return c->k + 1 < c->plen ? read_bit_at(c->k + 1) : -1;
     return read_bit();
 }
 

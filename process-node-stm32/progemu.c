@@ -30,6 +30,7 @@
 
 uint32_t pe_now;
 uint32_t pe_cyc_us = 16U;
+int pe_skew;
 uint32_t pe_break_frame_us = 6667U;
 uint32_t pe_pool[PE_POOL_BYTES / 4U];
 
@@ -1312,8 +1313,12 @@ int progemu_command(char *cmd)
     {
         if (strcmp(sub, k_chips[i]->name) == 0)
         {
+            char *opt = strtok(NULL, " ");
+            char *val = strtok(NULL, " ");
+            pe_skew = (opt != NULL && strcmp(opt, "skew") == 0 && val != NULL) ? (int)strtol(val, NULL, 0) : 0;
             pe_start(k_chips[i]);
-            printf("PROG_EMU ok proto=%s chip=\"%s\"\r\n", k_chips[i]->name, k_chips[i]->what);
+            printf("PROG_EMU ok proto=%s chip=\"%s\"%s\r\n", k_chips[i]->name, k_chips[i]->what,
+                   pe_skew != 0 ? " (SKEWED: not the spec)" : "");
             return 1;
         }
     }

@@ -24,6 +24,7 @@
 uint32_t pe_now;
 uint32_t pe_cyc_us = 16U;
 uint32_t pe_pool[PE_POOL_BYTES / 4U];
+int pe_skew;
 uint32_t pe_break_frame_us = 40000U;   /* the sim's write is instant: the BREAK frame ends 40 ms after the call */
 
 

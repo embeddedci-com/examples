@@ -344,6 +344,16 @@ on the wire as soon as the falling edge has let the previous one go (the start b
 edge, and the pod drops it). A pod that sampled with the clock low would see the next bit one clock early; none
 of the pod's read paths does. The trace shows both edges, so the waveform is visible.
 
+**PIC read shift (open).** On the bench every PIC ID word the pod reads is twice the expected value on the 6-bit
+set (device word 0x00A4 read as 0x0148) and half on the 8-bit sets. The node's trace of one `info` shows the
+line carrying the right frame: 16 clock pulses after the read command, the start bit (0) in the first, then
+0x1482 (DEV 0xA4 << 5 | REV 2) LSB first, then the stop bit; driving each bit early (before its rising edge)
+changed nothing. Both the pod's read path and the emulator's frame look right on their own, and the cause is
+not established. `prog_emu <pic> skew <n>` emits the frame n clocks early (n > 0) or late for a diagnostic run
+(the console says SKEWED), and the test `test_pic_read_skew_probe` prints the IDs read at skew 0, 1 and -1:
+if skew 1 gives the right ID, the pod's samples lag the frame by one clock. The PIC and UPDI HIL tests are
+marked `xfail` (not strict, the counts are still printed) until this and the UPDI no-reply are resolved.
+
 **What the node cannot do exactly.** All of it runs from interrupts (at 128 MHz while an emulator runs):
 - C2 specifies the chip driving C2D within nanoseconds of the rising edge, and the pod's feed reads
   120 ns or more after it. The interrupt needs about a microsecond, so `c2` can hand the pod the

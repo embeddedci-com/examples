@@ -20,6 +20,9 @@
 /* The cycle counter at the event being handled, and the cycles in one microsecond. */
 extern uint32_t pe_now;
 extern uint32_t pe_cyc_us;
+/* Diagnostic knob (`prog_emu pic skew <n>`): the PIC read frame is emitted n clocks early (n > 0) or
+   late. 0 is the spec. */
+extern int pe_skew;
 
 /* RAM the running chip model keeps its state in. Only one runs at a time, so they share it. */
 #define PE_POOL_BYTES 24576U
