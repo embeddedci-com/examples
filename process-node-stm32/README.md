@@ -69,16 +69,16 @@ same table as a wiring profile (see [Wiring profile](#wiring-profile)):
 | LA2 | PB9 | I2C1 SDA | both (open drain), pod pull-up 4.7k |
 | LA3 | PA9 | USART1 TX, console | node |
 | LA4 | PA10 | USART1 RX, console | pod |
-| LA5 | PB0 | alarm | node |
+| LA5 | PB0 | alarm; reset of the PIC and TPI emulators | node (alarm), pod (emulators, open drain) |
 | LA6 | PA8 via 1 kOhm | strobe / data ready | node (strobe on) or pod (data-ready tests) |
-| LA7 | PC10 | USART3 TX | node |
+| LA7 | PC10 | USART3 TX; UPDI of the UPDI emulators | node (USART3), both (UPDI, open drain) |
 | LA8 | PC11 | USART3 RX | pod |
 | LA9 | PB13 | SPI2 SCK | node |
 | LA10 | PB15 | SPI2 MOSI | node |
 | LA11 | SWCLK | SWD | pod |
 | LA12 | SWDIO | SWD | both |
-| LA13 | PB14 | SPI2 MISO | pod |
-| LA14 | PB12 | SPI2 CS | node |
+| LA13 | PB14 | SPI2 MISO; clock of the chip emulators | pod |
+| LA14 | PB12 | SPI2 CS; data of the chip emulators | node (SPI CS), both (emulators) |
 
 **JTAG wiring (in place on the bench since 2026-11-23).** For the pod's JTAG tests LA9 and LA10 carry
 the node's JTAG pins instead of SPI2 SCK and MOSI: **PA15 (JTDI, morpho CN7 pin 17) -> LA9** and
@@ -113,6 +113,7 @@ wiring (`--benchpod-wiring`, `--benchpod-wiring-profile`, `BENCHPOD_WIRING`,
 make                         # build/process-node.elf, 8 MHz module crystal
 make MCP2515_OSC_HZ=16000000 # module with a 16 MHz crystal
 make test-host               # bit-timing, process logic and compensation unit tests, no hardware
+make test-host-progemu BENCHPOD_FW=../../benchpod-firmware   # chip emulators vs the pod's protocol code, no hardware
 ```
 
 With 8 MHz the fastest bitrate is 500 kbit/s; 1 Mbit/s needs a 16 MHz crystal.
@@ -161,6 +162,9 @@ With 8 MHz the fastest bitrate is 500 kbit/s; 1 Mbit/s needs a 16 MHz crystal.
 | `can print on\|off` | print received frames (default on) |
 | `can selftest` | loop a frame inside the MCP2515, nothing on the bus |
 | `can regs` | dump MCP2515 registers |
+| `prog_emu <updi\|updimega\|updi2\|pic\|pic8\|pic18\|pic18q10\|c2\|c2early\|tpi\|tpi20\|tpi40\|tpi104\|pdi>` | answer as that chip for the pod's `prog_flash` (see [Chip emulators](#chip-emulators-prog_emu)); `PROG_EMU ok proto=.. chip=".."` |
+| `prog_emu stop` / `stat` / `clear` / `lock` / `list` | normal pins back; counters, timing and CRC32 of each memory; zero the counters; lock the chip; the chips |
+| `prog_emu dump <mem> <addr> <len>` | hex of an emulated memory (up to 4096 bytes), 32 bytes a line: `0040:<hex>` |
 
 Received frames print as `CAN rx id=0x123 ext=0 rtr=0 dlc=2 data=0102`.
 
@@ -234,6 +238,187 @@ transceiver with automatic direction control (`de off` here) works too.
 DE's falling edge is timed by EXTI line 8 on PA8: a byte counts as driven when DE fell within its
 stop bit, as a master that drives DE well drops it at the end of the last stop bit, often before
 the byte's receive interrupt has run.
+
+## Chip emulators (prog_emu)
+
+The BenchPod's `prog_flash` programs chips over their own pins: AVR UPDI, TPI and XMEGA PDI, PIC ICSP,
+Silicon Labs C2. With no chips on the bench, `prog_emu <chip>` makes the NUCLEO answer as one, so the
+pod's protocols run against something other than their own host test. The chip models are the
+bit-level models of benchpod-firmware's `stm32h563/test/test_prog_<proto>.c`, ported to this board
+(`progemu_<proto>.c`: plain C, no HAL, time from the cycle counter); the pins, interrupts and the
+console are `progemu.c`. Emulated memories live in RAM and start erased.
+
+Wires (all existing; the same LA channels as the SPI sensor and the UART sensor, so run these
+instead of those, not with them):
+
+| Pod | Node | Used by | Notes |
+|---|---|---|---|
+| LA13 | PB14 | clock: PIC ICSPCLK, C2CK, TPICLK, PDI_CLK | input with pull-up, EXTI on both edges |
+| LA14 | PB12 | data: ICSPDAT, C2D, TPIDATA, PDI_DATA | input; push-pull only while the chip drives it, released on the next clock edge; the pod holds a 10k pull-up |
+| LA5 | PB0 | PIC MCLR, TPI RESET (`"reset":5`) | input with pull-up, EXTI on both edges; the pod drives it open drain. The pod's own reset pin is wired to the NRST of the F446 and must not be used. PB0 is the alarm output again after `prog_emu stop` |
+| LA7 | PC10 | UPDI (`data` = 7) | USART3 in single-wire half duplex, 8E2, open drain |
+
+| `prog_emu` | Chip (default ID, as the pod reports it) | Memories (`dump`, CRC32) |
+|---|---|---|
+| `pic` | PIC16F1xxx-like, 6-bit commands, key LSb first with 33 clocks, one ID word with DEV 0A4 and REV 02 packed: `a4000200` | `flash` 8192 B (4096 14-bit words, little endian), `eeprom` 256, `config` 64 (config words and user ID, 16 bits each), `uid` 32 (unused here) |
+| `pic8` | PIC16F18xxx-like, 8-bit commands (key MSb first, 32 clocks), device 30B2 rev 2001: `b2300120` | same |
+| `pic18` | PIC18 Q43/Q84-like: byte PC, Program Data (0xC0/0xE0) writes one word with no row latches, Bulk Erase 0x18 takes a region payload, config bytes, device 7A31 rev 2003: `317a0320` | `flash` 8192 B (16-bit words), `eeprom` 256, `config` 64 (bytes at 0x300000, one per 16-bit cell), `uid` 32 (16-bit words at 0x200000) |
+| `pic18q10` | PIC18 Q10-like: Bulk Erase has no payload (the PC picks the regions), 16-bit config words, TERAB 75 ms, device 7B10 rev 2004: `107b0420` | same layout; `config` holds 16-bit words |
+| `c2` | Silicon Labs C2 (EFM8BB2/UB1-like), device 32 rev 03 derivative 21: `320321`; FPDAT 0xB4 | `flash` 8192 B; the lock byte is its last byte (0x1FFF), so an image that ends in a byte other than FF locks the chip |
+| `c2early` | the same chip, data driven early (see below) | same |
+| `tpi` | ATtiny10: `1e9003`, one word a write | `flash` 1024 B (section erase wipes it all), `config` 2 (the configuration byte, the lock bits) |
+| `tpi20`, `tpi40` | ATtiny20 `1e910f` (2 words a write), ATtiny40 `1e920e` (4 words), IDLE between the words | `flash` 2048 and 4096 B |
+| `tpi104` | ATtiny104-like `1e900b`: also PAGE_ERASE (0x18) | `flash` 1024 B |
+| `pdi` | XMEGA-like, device 1E 94 41: `1e9441` | `flash` 20480 B (128-byte pages), `eeprom` 1024, `user` 128, `config` 8 (fuse bytes 0-6, the lock byte) |
+| `updi` | tinyAVR-like (NVM v0), signature 1E 94 21: `1e9421` | `flash` 16384 B at 0x8000 (64-byte pages), `eeprom` 256, `config` 10 (fuses), `user` 32 |
+| `updimega` | megaAVR 0-like (NVM v0), family string `megaAVR`, signature 1E 94 26: `1e9426` | same, `flash` at 0x4000 (the pod takes the base from the SIB) |
+| `updi2` | AVR DA-like (NVM v2), signature 1E 97 0A: `1e970a` | `flash` 16384 B at 0x800000 (512-byte pages), `eeprom` 512, `config` 16, `user` 32 |
+
+What the pod is told (the node knows no device tables, the pod does not either): `page` is the chip's
+write page in bytes (the Memories column), and the PIC chips need `flags` for the command set and the
+code-protect bit, with `cp_addr` holding the byte address of the config word that carries it:
+
+| `prog_emu` | `flags` | `cp_addr` | `page` |
+|---|---|---|---|
+| `pic` | `PIC_F_CP_BIT(5) \| PIC_F_HAS_EE` = `0x504` | `0x1000E` | 16 |
+| `pic8` | `PIC_F_SET8 \| PIC_F_CP_BIT(1)` = `0x101` | `0x10016` | 32 |
+| `pic18` | `PIC_F_SET8 \| PIC_F_BYTEPC \| PIC_F_CP_BIT(3)` = `0x303` | `0x300004` | 32 |
+| `pic18q10` | `PIC_F_SET8 \| PIC_F_BYTEPC \| PIC_F_Q10 \| PIC_F_CP_BIT(3)` = `0x313` | `0x300004` | 32 |
+| `tpi20`, `tpi40`, `tpi104` | words per write (2, 4) or `TPI_F_PAGE_ERASE` (8) | 0 | 16 |
+
+**Datasheet behavior.** The models follow the vendors' documents as the pod's fixed protocol code
+(benchpod-firmware #241-#244) reads them, not the first reading: PIC key order and 33 clocks on
+the 6-bit set, the packed ID word, PIC18 Q Program Data and Bulk Erase payloads, TENTH 1 ms on the
+PIC18 Qs; C2 data driven after the rising clock edge, the page erase's 0x00 byte and third status
+(40 ms), the device setup writes (VDD monitor, SFR 0xFF/0xEF/0xA9) counted in `unprepared` when an
+erase or write comes without them; TPI section erase of the whole flash, the group writes with IDLE
+between the words, TPIIR; PDI RESET 0x59 before the key, the enable timing (data high 1 us, 16 idle
+clocks, clock within 100 us), the turn-off when the clock is slower than about 10 kHz (`dropouts`),
+the bus off during a chip erase, READ_NVM before NVM-space reads, the fuse write started by a PDI
+write; UPDI starting disabled (enable pulse, or a BREAK, then SYNC inside its window; `timing_viol`),
+the 10 ms v2 EEPROM byte write (a streamed byte meanwhile is lost: `drops`; an ACKed one is held),
+NVMPROG appearing 2 ms after the key, the megaAVR 0 flash base.
+
+**Core clock.** The node normally runs from the 16 MHz HSI; the pod moves a pin edge about every 2 us,
+which is 32 core cycles, too few for an interrupt that runs a chip model. While an emulator runs, the core
+is switched to **128 MHz** from the PLL (HSI / 8 x 128 / 2, 4 flash wait states, instruction and data
+caches on) and `prog_emu stop` puts the 16 MHz clock back, so the rest of the node keeps its timing. APB1 and
+APB2 are divided by 8, which leaves every peripheral bus at exactly 16 MHz: USART1's baud rate, I2C, SPI, the
+ADC and USART3 are unchanged, and only the SysTick, the cycle-count users (`core_mhz` in `stat` shows 128) and
+TIM6 (its clock is twice PCLK1 while APB1 is divided; ARR is doubled) follow. 180 MHz would put the buses at
+45/90 MHz and need every peripheral reprogrammed, so it is not used. At 128 MHz there are 256 cycles
+per 2 us edge.
+
+**Polling, not one interrupt per edge.** For the two-wire chips the first edge of a burst wakes an interrupt
+(EXTI, priority 0), which then watches GPIOB's clock, reset and data pins in a tight loop (a look every
+few cycles) until the pod has been quiet for 100 us, and returns. Other interrupts wait meanwhile (the console is
+not served during a burst; the watchdog is kicked from the loop). Three things keep the handler short:
+- **The pin moves first.** After each edge the chip model is asked (`peek`) what it will drive after the next
+  one; when that edge is noticed, PB12 is switched to it before the model runs (the model's own answer then
+  corrects it if the guess was wrong, which the host test counts and finds never). This is what meets a chip's
+  data-valid time after a clock edge: `react_ns` in `stat` is the time from noticing an edge to PB12 changing.
+- **Big erases are sliced.** A model that clears a flash image from the handler (device erase, chip erase) hands
+  it to `pe_fill8`/`pe_fill16`; the loop does it 64 elements at a time between edges, and the chip counts as
+  busy until it is done. C2 block reads are sent from the flash as the bytes go out instead of being copied
+  first. These inline loops were what made C2 and PDI handle some edges late.
+- **Statistics are cheap.** `proc_ns_max` and `proc_ns_avg` in `stat` are the time from noticing an edge to
+  having handled it; it must stay under the pod's shortest clock phase.
+`late` counts an edge that arrived while the previous one was handled (it is taken right after, with a late
+timestamp). `missed` stays 0 in this mode: the pod's phases are far longer than a look.
+
+**`prog_emu trace`.** Two-wire: the first 512 clock edges (`trace arm` starts a new window), one line each:
+index, `t_ns` from the first edge, `dt_ns` since the previous one, the clock level after the edge, the data
+level read at the edge, what the chip drove before and after (`-` released, `0`/`1` driven), `react_ns` and
+`proc_ns`. UPDI: the last 256 decisions in time order (a byte in with its USART status, SYNC taken or refused,
+the enable pulse, BREAK, the model decoding a frame and the reply bytes queued, the transmit and its end).
+
+**A run with missed edges is not a timing result.** If `missed` or `late` is not 0, `stat` prints
+`PROG_EMU WARNING timing_valid=0 ...` instead of `timing_valid=1`: edges were merged or taken late, the high and
+low times are inflated and the chip saw a damaged stream. The HIL test SKIPS on it, with the counts in the reason (an emulator limit, not a pod result); a pod-side
+failure (a result other than `ok`, a SYNC outside UPDI's enable window, nothing sent) still fails. PDI's
+data-line interrupt (the enable timing) is switched off once the chip is enabled, to halve the interrupt load.
+
+**PIC reads are driven early.** A real PIC changes its read data within 80 ns after a rising clock edge; this
+node needs about a microsecond. The pod samples only while the clock is high, so each bit after the first is put
+on the wire as soon as the falling edge has let the previous one go (the start bit comes with the first rising
+edge, and the pod drops it). A pod that sampled with the clock low would see the next bit one clock early; none
+of the pod's read paths does. The trace shows both edges, so the waveform is visible.
+
+**PIC read shift (open).** On the bench every PIC ID word the pod reads is twice the expected value on the 6-bit
+set (device word 0x00A4 read as 0x0148) and half on the 8-bit sets. The node's trace of one `info` shows the
+line carrying the right frame: 16 clock pulses after the read command, the start bit (0) in the first, then
+0x1482 (DEV 0xA4 << 5 | REV 2) LSB first, then the stop bit; driving each bit early (before its rising edge)
+changed nothing. Both the pod's read path and the emulator's frame look right on their own, and the cause is
+not established. `prog_emu <pic> skew <n>` emits the frame n clocks early (n > 0) or late for a diagnostic run
+(the console says SKEWED), and the test `test_pic_read_skew_probe` prints the IDs read at skew 0, 1 and -1:
+if skew 1 gives the right ID, the pod's samples lag the frame by one clock. The PIC and UPDI HIL tests are
+marked `xfail` (not strict, the counts are still printed) until this and the UPDI no-reply are resolved.
+
+**What the node cannot do exactly.** All of it runs from interrupts (at 128 MHz while an emulator runs):
+- C2 specifies the chip driving C2D within nanoseconds of the rising edge, and the pod's feed reads
+  120 ns or more after it. The interrupt needs about a microsecond, so `c2` can hand the pod the
+  previous bit if the pod samples early; `c2early` puts each bit on the wire during the preceding
+  low phase instead, so a slow interrupt still meets the read (a pod that wrongly samples with the
+  clock low is not caught by `c2early`). Try `c2`; if the IDs are off by a bit, read `missed`/`late`
+  and the high-time minimum in `stat` and use `c2early`.
+- The enable pulse and BREAK of UPDI and PDI's data-high timing are measured with the cycle counter
+  (62.5 ns), PDI's data edge by an extra EXTI line on PB12, so they are only as exact as the
+  interrupt latency (about 1 us).
+- A held UPDI ACK (v2 EEPROM, 10 ms) is a busy wait in the interrupt: the node does nothing else
+  meanwhile.
+- The 1.8 V/3.3 V levels, the 5 V-only parts (ATtiny4/5/9/10/20/40 need 5 V on a real bench) and the
+  bulk-erase supply minimums are the pod's to check; the emulator does not model supply voltage.
+- TPI and PDI clock limits (2 MHz, 10 kHz) other than the PDI turn-off are not checked.
+
+`prog_emu lock` locks the chip the way its own lock works (PIC code protection, the C2 lock byte,
+the AVR lock bits, UPDI's lock); a chip erase unlocks it again. A real chip does the same, so a
+locked chip answers `info` where it can and refuses to be read or written.
+
+`prog_emu stat` prints, after one `PROG_EMU stat` line (`edges rise fall nrst_edges frames errors
+timing missed late core_mhz`):
+
+- `high_ns` and `low_ns` (min, max, and the average of the intervals under 100 us): the time the
+  clock stayed high (rising to falling edge) and low, as the node saw it, from the cycle counter
+  captured at the top of the interrupt. `high_hist_us` and `low_hist_us` count the intervals in the
+  bins `<0.5, <1, <2, <4, <8, <16, <64, <256, >=256` us. UPDI reports the SYNC bit time it measured
+  and the baud rate it set instead (`PROG_EMU updi_wire ... sync_bit_ns=`).
+- `missed` and `late`: an edge that was gone before the handler read the pins (both edges came
+  while the previous one was handled), and an edge that arrived while the previous one was still
+  being handled (it is taken right after). Both mean the pod's bit-bang is faster than the node can
+  follow at the core clock; the handler does a model step and a pin write per edge and
+  nothing else (no printf, only counters), at the top interrupt priority.
+- `frames` and `errors`: commands or frames the chip took, and what a real chip would not accept
+  (bad frames, parity errors, a command while the NVM is busy, a wrong key, and the protocol's own
+  timing rules, which `timing` counts separately: PIC's 1 us command delays and 250 us entry hold,
+  the C2 enable wait). A protocol line follows (`PROG_EMU pic entries=.. bad_cmds=.. ...`).
+- `crc`: the CRC32 (zlib's) of every memory, in the byte layout of the table above, to compare with
+  the image's.
+
+`PROG_EMU updi_dbg` (UPDI only): how often the chip went back to waiting for a SYNC (`hunts`), SYNCs refused by
+the enable window (`gate_rejects`), SYNC edge patterns thrown away (`interval_resets`, `bad_brr`, `bad_low`),
+`tx_bursts` (replies started), bad frames dropped (and the status flags of the last one), SYNCs taken as bytes,
+and the last bytes received (`last_rx`, newest first). Between frames the UPDI receiver stays on at the measured
+baud rate: a SYNC is then a received 0x55 byte and the enable pulse a 0x00; only the first SYNC, a BREAK and a
+frame that arrives damaged send the chip back to timing the SYNC edge to edge. The
+UPDI protocol line counts replies by frame type (`tx_ldcs`, `tx_lds`, `tx_ld`, `tx_ptr`, `tx_sib`, `tx_ack`).
+
+`PROG_EMU updi_gap_us` (UPDI only): for the enable pulse and for the BREAK, how many there were and the
+gap in us from the end of the low (its rising edge) to the first edge of the next SYNC (min, max, last), plus the
+length of the last and the longest low. It is measured whether or not the chip accepted the SYNC, so the bench
+sees the pod's real timing against the 200 us to 14 ms window (pulse) and the 5 ms after the BREAK's frame.
+
+UPDI details: the receiver is off while the chip waits for a frame. EXTI line 10 times the five
+falling edges of the SYNC byte (0x55), the baud rate is derived from them (the pod's UPDI links run at 115200 to 225000 baud), the receiver is switched on at the end of the
+SYNC and takes the rest of the frame. A low of more than 1 ms, or a framing error with 0x00, is a
+BREAK (the chip leaves its state and waits for a SYNC). A frame with a parity or framing error is
+dropped and counted. Replies leave a ring through the USART3 interrupt two bit times after the
+request's last stop bit, with the receiver off (no echo to take in). While an emulator runs, `uart3 open`,
+`modbus start` and `spi x` are refused (`prog_emu stop` first). The pod's UART engine and a UART session exclude
+each other, so the console must be closed while an UPDI job runs (the tests do that).
+
+`make test-host-progemu BENCHPOD_FW=<benchpod-firmware checkout>` runs all of this on the host: the
+pod's own `prog_<proto>.c` (branch `prog-flash` and later) against these models over `prog_sim`,
+erase, write, read back, the lock and a stopped chip. It checks the models, not the interrupt code.
 
 ## HIL tests
 
@@ -313,6 +498,13 @@ the 200 ms env reads, and PB0 rising within 0.5 ms of the reading that confirms 
 `tests/test_power.py`: firmware boot time and power-on-to-ready, idle and regulating
 supply current against a budget (`PROCESS_NODE_IDLE_MA_MAX`, whole Nucleo board), and
 5 ms / 50 ms / 500 ms supply dropouts (rides through or reboots cleanly, never hangs).
+
+`tests/test_prog_emu.py` (marker `prog`; skips without the pod's `prog_flash`): for each emulated chip, a random
+image through `load_bin` into PSRAM, `info` (ID), `start` with a chip erase, poll `status`, and the CRC32 of the
+emulated flash (`prog_emu stat`) against the image's; a wrong `expect_id` (the flash is untouched), a locked chip
+(refused without an erase, unlocked and flashed with one) and a stopped emulator (no answer). The edge timing
+each run measured is printed (`-s`) and appended to `$PROG_EMU_TIMING_LOG`. See
+[Chip emulators](#chip-emulators-prog_emu).
 
 `tests/test_update.py`: flash, boot and identify the image N times
 (`PROCESS_NODE_FLASH_CYCLES`, default 2; needs `--benchpod-firmware`).
