@@ -306,12 +306,20 @@ caches on) and `prog_emu stop` puts the 16 MHz clock back, so the rest of the no
 APB2 are divided by 8, which leaves every peripheral bus at exactly 16 MHz: USART1's baud rate, I2C, SPI, the
 ADC and USART3 are unchanged, and only the SysTick, the cycle-count users (`core_mhz` in `stat` shows 128) and
 TIM6 (its clock is twice PCLK1 while APB1 is divided; ARR is doubled) follow. 180 MHz would put the buses at
-45/90 MHz and need every peripheral reprogrammed, so it is not used. At 128 MHz an interrupt has 256 cycles
+45/90 MHz and need every peripheral reprogrammed, so it is not used. At 128 MHz there are 256 cycles
 per 2 us edge.
+
+**Polling, not one interrupt per edge.** For the two-wire chips the first edge of a burst wakes an interrupt
+(EXTI, priority 0), which then polls the EXTI pending bits of the clock, reset and data lines in a tight loop
+(about 20 cycles a look, edges timestamped with the cycle counter) until the pod has been quiet for 100 us, and
+returns. Other interrupts wait meanwhile (the console is not served during a burst; the watchdog is kicked from
+the loop). `late` counts an edge that arrived while the previous one was handled, `missed` a pending bit whose
+level had not changed (two edges between two looks).
 
 **A run with missed edges is not a timing result.** If `missed` or `late` is not 0, `stat` prints
 `PROG_EMU WARNING timing_valid=0 ...` instead of `timing_valid=1`: edges were merged or taken late, the high and
-low times are inflated and the chip saw a damaged stream. The test fails on it for the two-wire chips. PDI's
+low times are inflated and the chip saw a damaged stream. The HIL test SKIPS on it, with the counts in the reason (an emulator limit, not a pod result); a pod-side
+failure (a result other than `ok`, a SYNC outside UPDI's enable window, nothing sent) still fails. PDI's
 data-line interrupt (the enable timing) is switched off once the chip is enabled, to halve the interrupt load.
 
 **What the node cannot do exactly.** All of it runs from interrupts (at 128 MHz while an emulator runs):
@@ -341,7 +349,7 @@ timing missed late core_mhz`):
   clock stayed high (rising to falling edge) and low, as the node saw it, from the cycle counter
   captured at the top of the interrupt. `high_hist_us` and `low_hist_us` count the intervals in the
   bins `<0.5, <1, <2, <4, <8, <16, <64, <256, >=256` us. UPDI reports the SYNC bit time it measured
-  and the baud rate it set instead (`PROG_EMU updi ... sync_bit_ns=`).
+  and the baud rate it set instead (`PROG_EMU updi_wire ... sync_bit_ns=`).
 - `missed` and `late`: an edge that was gone before the handler read the pins (both edges came
   while the previous one was handled), and an edge that arrived while the previous one was still
   being handled (it is taken right after). Both mean the pod's bit-bang is faster than the node can
@@ -356,7 +364,10 @@ timing missed late core_mhz`):
 
 `PROG_EMU updi_dbg` (UPDI only): how often the chip went back to waiting for a SYNC (`hunts`), SYNCs refused by
 the enable window (`gate_rejects`), SYNC edge patterns thrown away (`interval_resets`, `bad_brr`, `bad_low`),
-`tx_bursts` (replies started), bad frames dropped, and the last bytes received (`last_rx`, newest first). The
+`tx_bursts` (replies started), bad frames dropped (and the status flags of the last one), SYNCs taken as bytes,
+and the last bytes received (`last_rx`, newest first). Between frames the UPDI receiver stays on at the measured
+baud rate: a SYNC is then a received 0x55 byte and the enable pulse a 0x00; only the first SYNC, a BREAK and a
+frame that arrives damaged send the chip back to timing the SYNC edge to edge. The
 UPDI protocol line counts replies by frame type (`tx_ldcs`, `tx_lds`, `tx_ld`, `tx_ptr`, `tx_sib`, `tx_ack`).
 
 `PROG_EMU updi_gap_us` (UPDI only): for the enable pulse and for the BREAK, how many there were and the

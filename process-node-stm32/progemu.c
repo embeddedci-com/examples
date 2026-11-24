@@ -209,6 +209,7 @@ typedef struct { uint32_t n, min, max, last, low_last, low_max; } gapst_t;
 static gapst_t s_gap[2];                         /* 0: enable pulse, 1: BREAK */
 static int s_ev_kind = -1;
 static uint32_t s_ev_end;
+static uint32_t s_rxsync, d_last_sr;
 static uint32_t d_hunts, d_gate_rej, d_ival, d_bad_brr, d_bad_low, d_bursts, d_err_drop;
 static uint8_t s_lastrx[8];
 static uint32_t s_nlast;
@@ -261,9 +262,9 @@ static void updi_rx_on(void)
     s_umode = U_RX;
 }
 
+/* After a received byte: start the reply when the chip queued one. */
 static void updi_next(uint32_t t_rx)
 {
-    const pe_chip_t *c = s_chip;
     if (s_txh != s_txt)
     {
         /* answer two bit times after the request ended (we are mid first stop bit now): the pod's
@@ -273,10 +274,6 @@ static void updi_next(uint32_t t_rx)
         {
             if ((int32_t)(s_hold - target) > 0) target = s_hold;   /* an ACK held until a write is done */
             s_holdv = 0U;
-    d_hunts = d_gate_rej = d_ival = d_bad_brr = d_bad_low = d_bursts = d_err_drop = 0U;
-    s_nlast = 0U;
-    memset(s_gap, 0, sizeof s_gap);
-    s_ev_kind = -1;
         }
         while ((int32_t)(DWT->CYCCNT - target) < 0)
         {
@@ -285,9 +282,20 @@ static void updi_next(uint32_t t_rx)
         USART3->CR1 = (USART3->CR1 & ~USART_CR1_RE) | USART_CR1_TXEIE;
         s_umode = U_TX;
     }
-    else if (c->want_sync())
+}
+
+/* The gap from the end of the last enable pulse or BREAK to the start of a SYNC. */
+static void gap_note(uint32_t start)
+{
+    if (s_ev_kind >= 0)
     {
-        updi_hunt();
+        gapst_t *g = &s_gap[s_ev_kind];
+        uint32_t gap = start - s_ev_end;
+        if (g->n == 0U || gap < g->min) g->min = gap;
+        if (gap > g->max) g->max = gap;
+        g->last = gap;
+        g->n++;
+        s_ev_kind = -1;
     }
 }
 
@@ -303,16 +311,7 @@ static void updi_edge(uint32_t t, int lvl)
     {
         if (s_nf == 0U)
         {
-            if (s_ev_kind >= 0)
-            {
-                gapst_t *g = &s_gap[s_ev_kind];
-                uint32_t gap = t - s_ev_end;
-                if (g->n == 0U || gap < g->min) g->min = gap;
-                if (gap > g->max) g->max = gap;
-                g->last = gap;
-                g->n++;
-                s_ev_kind = -1;
-            }
+            gap_note(t);
             pe_now = t;
             if (!c->sync_gate())          /* disabled, or a SYNC outside its window: not taken */
             {
@@ -425,19 +424,59 @@ int progemu_usart3_irq(void)
         {
             s_u_rx++;
             s_lastrx[s_nlast++ & 7U] = b;
-            pe_now = t;
+            uint32_t bitc = s_bit_cyc;
             if ((sr & USART_SR_FE) && b == 0U)
             {
-                s_breaks++;
-                c->brk();
+                /* BREAK: the low goes on, the rising edge (EXTI) says when it ends */
+                s_fall_t = t - 10U * bitc;
                 updi_hunt();
             }
             else if (sr & (USART_SR_FE | USART_SR_PE | USART_SR_NE))
             {
                 d_err_drop++;                  /* a bad frame is not taken; the pod times out and breaks */
+                d_last_sr = sr;
+                if (c->want_sync())
+                {
+                    updi_hunt();               /* the baud rate may have changed: measure the next SYNC */
+                }
+            }
+            else if (c->want_sync())
+            {
+                /* between frames the receiver stays on at the measured baud rate: a SYNC is a 0x55
+                   byte (it must come inside the enable window), the enable pulse a 0x00 */
+                if (b == 0x55U)
+                {
+                    uint32_t start = t - (bitc * 21U) / 2U;       /* its start bit, 10.5 bits ago */
+                    gap_note(start);
+                    pe_now = start;
+                    if (c->sync_gate())
+                    {
+                        c->sync();
+                        s_sync_n++;
+                        s_rxsync++;
+                    }
+                    else
+                    {
+                        d_gate_rej++;
+                    }
+                }
+                else if (b == 0U)
+                {
+                    pe_now = t - bitc / 2U;                        /* the low ends where the stop bits start */
+                    s_ev_kind = 0;
+                    s_ev_end = pe_now;
+                    s_gap[0].low_last = 10U * bitc;
+                    c->pulse();
+                }
+                else
+                {
+                    pe_now = t;
+                    c->rx(b);
+                }
             }
             else
             {
+                pe_now = t;
                 c->rx(b);
                 updi_next(t);
             }
@@ -462,14 +501,7 @@ int progemu_usart3_irq(void)
     {
         USART3->CR1 = cr1 & ~USART_CR1_TCIE;
         USART3->SR = ~USART_SR_TC;
-        if (c->want_sync())
-        {
-            updi_hunt();
-        }
-        else
-        {
-            updi_rx_on();
-        }
+        updi_rx_on();
     }
     return 1;
 }
@@ -491,6 +523,10 @@ static void updi_start(void)
     s_sync_n = s_bad_sync = s_breaks = s_u_fe = s_u_pe = s_u_ne = s_u_ore = s_u_rx = s_u_tx = 0U;
     s_tx_over = s_sync_last = s_sync_max = s_brr_last = 0U;
     s_holdv = 0U;
+    d_hunts = d_gate_rej = d_ival = d_bad_brr = d_bad_low = d_bursts = d_err_drop = 0U;
+    s_rxsync = d_last_sr = s_nlast = 0U;
+    memset(s_gap, 0, sizeof s_gap);
+    s_ev_kind = -1;
     s_sync_min = 0xFFFFFFFFU;
     uint32_t pclk = HAL_RCC_GetPCLK1Freq();
     s_apb_div = SystemCoreClock / pclk;
@@ -525,81 +561,133 @@ static void updi_stop(void)
 
 /* ---------------------------------------------------------------- two-wire */
 
-void EXTI15_10_IRQHandler(void)
+/* The bit stream is followed by polling, not by one interrupt per edge. The first edge of a burst
+   wakes an interrupt (EXTI15_10 or EXTI0, priority 0); this loop then watches the EXTI pending bits
+   of the clock, reset and data lines (they are set by every edge, interrupt masked or not, and the
+   handler is not re-entered) and stays until the lines have been quiet for 100 us. An edge is
+   timestamped about 20 cycles (150 ns at 128 MHz) after it happened, and an edge that arrives while
+   the previous one is still handled is counted (`late`), a pending bit whose level did not change
+   (two edges between two looks) is `missed`. Other interrupts wait while the loop runs; the
+   watchdog is kicked from it. */
+static uint32_t s_lines;                 /* the lines the loop watches */
+static int s_prev_rst;
+
+static void pe_poll(const pe_chip_t *c)
 {
-    uint32_t t = DWT->CYCCNT;
-    uint32_t idr = GPIOB->IDR;
-    uint32_t pr = EXTI->PR & (CLK_LINE | UPDI_LINE | DATA_LINE);
-    EXTI->PR = pr;
-    const pe_chip_t *c = s_chip;
-    if (c == NULL)
+    uint32_t idle_t = DWT->CYCCNT;
+    const uint32_t idle_lim = 100U * pe_cyc_us;
+    uint32_t spin = 0U, n = 0U;
+    for (;;)
     {
-        return;
-    }
-    if (pr & CLK_LINE)
-    {
-        int clk = (int)((idr >> 14) & 1U);
-        if (clk == s_prev_clk)
+        uint32_t pr = EXTI->PR & s_lines;
+        if (pr == 0U)
         {
-            s_missed++;        /* both edges came before we ran: a pulse we could not follow */
-        }
-        else
-        {
-            s_prev_clk = clk;
-            pe_now = t;
-            c->edge(clk, s_drv >= 0 ? -1 : (int)((idr >> 12) & 1U));
-            drive_data(c->drive());
-            if (c->data_want != NULL && (*c->data_want != 0U) != s_data_on)
+            if (DWT->CYCCNT - idle_t > idle_lim)
             {
-                s_data_on = *c->data_want != 0U;
-                if (s_data_on) { EXTI->PR = DATA_LINE; EXTI->IMR |= DATA_LINE; }
-                else EXTI->IMR &= ~DATA_LINE;
+                return;
             }
-            s_edges++;
-            if (clk) s_rise++; else s_fall++;
-            if (s_first)
+            if ((++spin & 0xFFU) == 0U)
             {
-                s_first = 0;
+                IWDG->KR = 0xAAAAU;
+            }
+            continue;
+        }
+        uint32_t t = DWT->CYCCNT;
+        uint32_t idr = GPIOB->IDR;
+        EXTI->PR = pr;
+        idle_t = t;
+        if (pr & RST_LINE)
+        {
+            int low = (int)((idr & 1U) == 0U);
+            if (low != s_prev_rst)
+            {
+                s_prev_rst = low;
+                pe_now = t;
+                c->nrst(low);
+                drive_data(c->drive());
+                s_nrst_edges++;
+            }
+        }
+        if ((pr & DATA_LINE) && c->data != NULL && s_drv < 0)
+        {
+            pe_now = t;
+            c->data((int)((idr >> 12) & 1U));
+        }
+        if (pr & CLK_LINE)
+        {
+            int clk = (int)((idr >> 14) & 1U);
+            if (clk == s_prev_clk)
+            {
+                s_missed++;        /* both edges came between two looks: a pulse we could not follow */
             }
             else
             {
-                gap_add(clk ? &s_lo : &s_hi, t - s_last_t);
+                s_prev_clk = clk;
+                pe_now = t;
+                c->edge(clk, s_drv >= 0 ? -1 : (int)((idr >> 12) & 1U));
+                drive_data(c->drive());
+                if (c->data_want != NULL && (*c->data_want != 0U) != s_data_on)
+                {
+                    s_data_on = *c->data_want != 0U;
+                    if (s_data_on) { EXTI->PR = DATA_LINE; EXTI->IMR |= DATA_LINE; s_lines |= DATA_LINE; }
+                    else { EXTI->IMR &= ~DATA_LINE; s_lines &= ~DATA_LINE; }
+                }
+                s_edges++;
+                if (clk) s_rise++; else s_fall++;
+                if (s_first)
+                {
+                    s_first = 0;
+                }
+                else
+                {
+                    gap_add(clk ? &s_lo : &s_hi, t - s_last_t);
+                }
+                s_last_t = t;
             }
-            s_last_t = t;
+            if (EXTI->PR & CLK_LINE)
+            {
+                s_late++;          /* the next edge came while this one was handled */
+            }
         }
-        if (EXTI->PR & CLK_LINE)
+        if ((++n & 0x3FU) == 0U)
         {
-            s_late++;          /* the next edge came while this one was handled */
+            IWDG->KR = 0xAAAAU;
         }
     }
-    if ((pr & DATA_LINE) && c->data != NULL && s_drv < 0)
+}
+
+void EXTI15_10_IRQHandler(void)
+{
+    const pe_chip_t *c = s_chip;
+    if (c == NULL)
     {
-        pe_now = t;
-        c->data((int)((idr >> 12) & 1U));
+        EXTI->PR = CLK_LINE | UPDI_LINE | DATA_LINE;
+        return;
     }
-    if (pr & UPDI_LINE)
+    if (!c->uart)
     {
-        if (s_umode == U_HUNT)
-        {
-            s_edges++;
-            updi_edge(t, (int)((GPIOC->IDR >> 10) & 1U));
-        }
+        pe_poll(c);
+        return;
+    }
+    uint32_t t = DWT->CYCCNT;
+    uint32_t pr = EXTI->PR & UPDI_LINE;
+    EXTI->PR = pr;
+    if (pr && s_umode == U_HUNT)
+    {
+        s_edges++;
+        updi_edge(t, (int)((GPIOC->IDR >> 10) & 1U));
     }
 }
 
 void EXTI0_IRQHandler(void)
 {
-    uint32_t t = DWT->CYCCNT;
-    int low = (int)((GPIOB->IDR & 1U) == 0U);
-    EXTI->PR = RST_LINE;
     const pe_chip_t *c = s_chip;
-    if (c != NULL && c->nrst != NULL)
+    if (c == NULL || c->uart || c->nrst == NULL)
     {
-        pe_now = t;
-        c->nrst(low);
-        drive_data(c->drive());
-        s_nrst_edges++;
+        EXTI->PR = RST_LINE;
+        return;
     }
+    pe_poll(c);
 }
 
 static void wires_start(const pe_chip_t *c)
@@ -629,6 +717,7 @@ static void wires_start(const pe_chip_t *c)
         EXTI->IMR |= DATA_LINE;
         s_data_on = 1U;
     }
+    s_lines = CLK_LINE | (c->reset ? RST_LINE : 0U) | (c->data != NULL ? DATA_LINE : 0U);
     s_prev_clk = (int)((GPIOB->IDR >> 14) & 1U);
     EXTI->PR = CLK_LINE;
     EXTI->IMR |= CLK_LINE;
@@ -644,9 +733,11 @@ static void wires_start(const pe_chip_t *c)
         EXTI->FTSR |= RST_LINE;
         NVIC_SetPriority(EXTI0_IRQn, 0);
         NVIC_EnableIRQ(EXTI0_IRQn);
+        s_prev_rst = 0;
         if ((GPIOB->IDR & 1U) == 0U)
         {
             pe_now = DWT->CYCCNT;
+            s_prev_rst = 1;
             c->nrst(1);
         }
         EXTI->PR = RST_LINE;
@@ -819,7 +910,7 @@ static void print_stat(void)
     }
     else
     {
-        printf("PROG_EMU updi syncs=%lu bad_sync=%lu breaks=%lu framing=%lu parity=%lu noise=%lu "
+        printf("PROG_EMU updi_wire syncs=%lu bad_sync=%lu breaks=%lu framing=%lu parity=%lu noise=%lu "
                "overrun=%lu rx=%lu tx=%lu tx_overflow=%lu baud=%lu brr=%lu sync_bit_ns=%lu "
                "min=%lu max=%lu\r\n",
                (unsigned long)s_sync_n, (unsigned long)s_bad_sync, (unsigned long)s_breaks,
@@ -832,10 +923,10 @@ static void print_stat(void)
     if (c->uart)
     {
         printf("PROG_EMU updi_dbg hunts=%lu gate_rejects=%lu interval_resets=%lu bad_brr=%lu bad_low=%lu "
-               "tx_bursts=%lu bad_frames_dropped=%lu last_rx=",
+               "tx_bursts=%lu bad_frames_dropped=%lu last_bad_sr=%04lx syncs_by_byte=%lu last_rx=",
                (unsigned long)d_hunts, (unsigned long)d_gate_rej, (unsigned long)d_ival,
                (unsigned long)d_bad_brr, (unsigned long)d_bad_low, (unsigned long)d_bursts,
-               (unsigned long)d_err_drop);
+               (unsigned long)d_err_drop, (unsigned long)d_last_sr, (unsigned long)s_rxsync);
         for (uint32_t i = 0; i < 8U && i < s_nlast; i++)
         {
             printf("%02x", s_lastrx[(s_nlast - 1U - i) & 7U]);
@@ -918,7 +1009,7 @@ static void clear_counters(void)
     memset(s_gap, 0, sizeof s_gap);
     s_ev_kind = -1;
     d_hunts = d_gate_rej = d_ival = d_bad_brr = d_bad_low = d_bursts = d_err_drop = 0U;
-    s_nlast = 0U;
+    s_nlast = s_rxsync = d_last_sr = 0U;
 }
 
 /* ---------------------------------------------------------------- console */

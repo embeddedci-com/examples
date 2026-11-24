@@ -66,6 +66,7 @@ typedef struct {
     /* counters */
     uint32_t frames, bad_access, bad_frame, breaks, keys, chip_erases, resets;
     uint32_t st_words, st_bytes;
+    uint32_t rx_ops[16];                                         /* frames by opcode high nibble */
     uint32_t tx_ldcs, tx_lds, tx_ld, tx_sib, tx_ack, tx_ptr;     /* replies by frame type */
 } chip_t;
 
@@ -356,6 +357,7 @@ static void decode_op(void)
     c->ps = P_SYNC;
     c->na = 0;
     c->frames++;
+    c->rx_ops[op >> 4]++;
     switch (op >> 4)
     {
     case 0x0: c->cls = C_LDS; c->need = ((op >> 2) & 3) + 1; c->ps = P_ARGS; break;
@@ -415,7 +417,7 @@ static void decode_op(void)
 static void rx(uint8_t b)
 {
     chip_t *c = &C;
-    if (c->disabled) return;
+    if (c->disabled || !c->enabled) return;
     switch (c->ps)
     {
     case P_SYNC: if (b == 0x55) c->ps = P_OP; else c->bad_frame++; break;
@@ -552,11 +554,14 @@ static const pe_counts_t *counts(void)
 static void stat(void)
 {
     printf("PROG_EMU updi nvm=%d frames=%lu bad_frame=%lu bad_access=%lu breaks=%lu keys=%lu "
-           "chip_erases=%lu resets=%lu st_words=%lu st_bytes=%lu pulses=%lu timing_viol=%lu drops=%lu locked=%u prog=%u tx_ldcs=%lu tx_lds=%lu tx_ld=%lu tx_ptr=%lu tx_sib=%lu tx_ack=%lu\r\n",
+           "chip_erases=%lu resets=%lu st_words=%lu st_bytes=%lu pulses=%lu timing_viol=%lu drops=%lu locked=%u prog=%u rx_lds=%lu rx_ld=%lu rx_sts=%lu rx_st=%lu rx_ldcs=%lu rx_stcs=%lu rx_rep=%lu rx_key_sib=%lu tx_ldcs=%lu tx_lds=%lu tx_ld=%lu tx_ptr=%lu tx_sib=%lu tx_ack=%lu\r\n",
            C.nvm, (unsigned long)C.frames, (unsigned long)C.bad_frame, (unsigned long)C.bad_access,
            (unsigned long)C.breaks, (unsigned long)C.keys, (unsigned long)C.chip_erases,
            (unsigned long)C.resets, (unsigned long)C.st_words, (unsigned long)C.st_bytes,
            (unsigned long)C.pulses, (unsigned long)C.timing_viol, (unsigned long)C.drops, C.locked, C.prog,
+           (unsigned long)C.rx_ops[0], (unsigned long)C.rx_ops[2], (unsigned long)C.rx_ops[4],
+           (unsigned long)C.rx_ops[6], (unsigned long)C.rx_ops[8], (unsigned long)C.rx_ops[12],
+           (unsigned long)C.rx_ops[10], (unsigned long)C.rx_ops[14],
            (unsigned long)C.tx_ldcs, (unsigned long)C.tx_lds, (unsigned long)C.tx_ld, (unsigned long)C.tx_ptr,
            (unsigned long)C.tx_sib, (unsigned long)C.tx_ack);
 }
