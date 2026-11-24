@@ -40,7 +40,8 @@ static int g_prev_clk = 1;
 void pe_fill8(uint8_t *p, uint8_t v, uint32_t n) { memset(p, v, n); }
 void pe_fill16(uint16_t *p, uint16_t v, uint32_t n) { for (uint32_t i = 0; i < n; i++) p[i] = v; }
 int pe_fill_pending(void) { return 0; }
-static unsigned g_peek_miss, g_peek_n;
+static unsigned g_peek_miss, g_peek_n, g_fall_driven, g_rise_changes;
+static int g_last_drive = -1;
 
 void pe_updi_hold(uint32_t until)
 {
@@ -66,6 +67,11 @@ static void a_on_pins(prog_sim_t *s, int clk, int pod)
     g_edges++;
     int pk = g_chip->peek != NULL ? g_chip->peek(clk) : 0;
     g_chip->edge(clk, pod);
+    {
+        int d = g_chip->drive();
+        if (clk == 0 && d >= 0 && g_chip->reset) g_fall_driven++;   /* PIC/TPI: nothing may be driven after a falling edge... */
+        g_last_drive = d;
+    }
     if (g_chip->peek != NULL)
     {
         g_peek_n++;
@@ -202,7 +208,7 @@ static rig_t *rig_new(const tcase_t *tc)
     g_chip = tc->chip;
     g_sim = &r->sim;
     g_edges = 0;
-    g_peek_miss = g_peek_n = 0;
+    g_peek_miss = g_peek_n = g_fall_driven = 0;
     g_prev_clk = 1;
     tc->chip->init();
     prog_sim_init(&r->sim, &r->ops, &k_model, NULL);
@@ -288,6 +294,11 @@ static void test_flow(const tcase_t *tc)
     }
     free(mb);
     CHECK(r->sim.contention == 0);
+    if (strncmp(tc->name, "pic", 3) == 0)
+    {
+        /* a PIC read bit appears after the RISING edge and is let go at the falling one */
+        CHECK(g_fall_driven == 0);
+    }
     printf("  %-6s peek vs drive: %u of %u edges differ\n", tc->name, g_peek_miss, g_peek_n);
     CHECK(g_peek_miss * 1000U <= g_peek_n);
     report("flow", tc, r);
