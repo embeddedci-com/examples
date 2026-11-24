@@ -40,13 +40,13 @@ def pic_cp(bit):
 # name -> what the console starts, what the pod is told, the image
 CASES = {
     "pic": dict(pins={"proto": "pic", "clk": CLK, "data": DATA, "reset": RESET}, page=16,
-                flags=pic_cp(5) | PIC_F_HAS_EE, baud=0x1000E, size=8192, id="a4000200", w14=True),
+                flags=pic_cp(5) | PIC_F_HAS_EE, cp_addr=0x1000E, size=8192, id="a4000200", w14=True),
     "pic8": dict(pins={"proto": "pic", "clk": CLK, "data": DATA, "reset": RESET}, page=32,
-                 flags=PIC_F_SET8 | pic_cp(1), baud=0x10016, size=8192, id="b2300120", w14=True),
+                 flags=PIC_F_SET8 | pic_cp(1), cp_addr=0x10016, size=8192, id="b2300120", w14=True),
     "pic18": dict(pins={"proto": "pic", "clk": CLK, "data": DATA, "reset": RESET}, page=32,
-                  flags=PIC_F_SET8 | PIC_F_BYTEPC | pic_cp(3), baud=0x300004, size=8192, id="317a0320"),
+                  flags=PIC_F_SET8 | PIC_F_BYTEPC | pic_cp(3), cp_addr=0x300004, size=8192, id="317a0320"),
     "pic18q10": dict(pins={"proto": "pic", "clk": CLK, "data": DATA, "reset": RESET}, page=32,
-                     flags=PIC_F_SET8 | PIC_F_BYTEPC | PIC_F_Q10 | pic_cp(3), baud=0x300004, size=8192,
+                     flags=PIC_F_SET8 | PIC_F_BYTEPC | PIC_F_Q10 | pic_cp(3), cp_addr=0x300004, size=8192,
                      id="107b0420"),
     "c2": dict(pins={"proto": "c2", "clk": CLK, "data": DATA}, page=512, size=8192, id="320321",
                keep_last_ff=True),
@@ -151,10 +151,15 @@ def image_for(case, seed_bytes=None):
     return bytes(img)
 
 
+def _cp(case):
+    return {"cp_addr": case["cp_addr"]} if "cp_addr" in case else {}
+
+
 def start_args(case, img, **extra):
     a = {"op": "start", **case["pins"], "mem": "flash", "addr": 0, "len": len(img), "page": case["page"],
-         "erase": "chip", "expect_id": "0x" + case["id"][:4], "flags": case.get("flags", 0),
-         "baud": case.get("baud", 0), "run": True}
+         "erase": "chip", "expect_id": "0x" + case["id"][:4], "flags": case.get("flags", 0), "run": True}
+    if "cp_addr" in case:
+        a["cp_addr"] = case["cp_addr"]
     a.update(extra)
     return a
 
@@ -190,12 +195,18 @@ def emu(benchpod, wiring, node):
     if tuple(int(x) for x in info["version"].split(".")) < (0, 3, 4):
         pytest.skip("the node's firmware has no prog_emu (0.3.4+): flash it (--benchpod-firmware)")
     benchpod.fpga_image(FpgaImage.DEEP_REPLAY)
+    # the wiring profile marks LA14 (PB12, the node's SPI CS) and others as DUT outputs, and the pod
+    # refuses to drive a DUT output (BP0034): during these tests the chip wires are bidirectional
+    benchpod.la_dir([CLK, DATA, RESET, UPDI_DATA], "bidir")
     stage = getattr(benchpod._transport, "stage_psram", None)
     if stage is None:
         pytest.skip("staging an image needs the pod over the LAN (TCP) or the cloud")
     e = Emu(benchpod, node, stage)
-    yield e
-    node.cmd("prog_emu stop", r"PROG_EMU ok stopped\r\n")
+    try:
+        yield e
+    finally:
+        node.cmd("prog_emu stop", r"PROG_EMU ok stopped\r\n")
+        benchpod.apply_pin_directions()            # the profile's directions again
 
 
 @pytest.fixture(params=list(CASES))
@@ -209,7 +220,7 @@ def case_name(request, emu):
 def test_info_reads_the_chip_id(emu, case_name):
     case = CASES[case_name]
     emu.start(case_name)
-    st = emu.job({"op": "info", **case["pins"]}, flags=case.get("flags", 0), baud=case.get("baud", 0))
+    st = emu.job({"op": "info", **case["pins"]}, flags=case.get("flags", 0), **_cp(case))
     assert st["result"] == "ok", st
     assert st["id"] == case["id"], st
 
@@ -268,5 +279,5 @@ def test_stopped_emulator_does_not_answer(emu, case_name):
     case = CASES[case_name]
     emu.start(case_name)
     emu.stop()
-    st = emu.job({"op": "info", **case["pins"]}, flags=case.get("flags", 0), baud=case.get("baud", 0))
+    st = emu.job({"op": "info", **case["pins"]}, flags=case.get("flags", 0), **_cp(case))
     assert st["result"].startswith("no answer") or st["result"].startswith("protocol error"), st

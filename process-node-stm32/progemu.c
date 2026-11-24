@@ -121,6 +121,12 @@ static uint32_t s_ft[5];                        /* the falling edges of the SYNC
 static uint8_t s_nf, s_pend;
 static uint32_t s_apb_div = 1U;                 /* core clock / USART3 clock */
 static uint32_t s_fall_t;
+/* the gap from the end of the last enable pulse or BREAK to the first edge of the next SYNC, and the
+   lengths of those lows: the pod's real timing, whether or not the chip accepted it */
+typedef struct { uint32_t n, min, max, last, low_last, low_max; } gapst_t;
+static gapst_t s_gap[2];                         /* 0: enable pulse, 1: BREAK */
+static int s_ev_kind = -1;
+static uint32_t s_ev_end;
 static uint32_t s_sync_n, s_bad_sync, s_breaks, s_u_fe, s_u_pe, s_u_ne, s_u_ore, s_u_rx, s_u_tx,
                 s_tx_over, s_sync_last, s_sync_min, s_sync_max, s_brr_last;
 
@@ -180,6 +186,8 @@ static void updi_next(uint32_t t_rx)
         {
             if ((int32_t)(s_hold - target) > 0) target = s_hold;   /* an ACK held until a write is done */
             s_holdv = 0U;
+    memset(s_gap, 0, sizeof s_gap);
+    s_ev_kind = -1;
         }
         while ((int32_t)(DWT->CYCCNT - target) < 0)
         {
@@ -205,6 +213,16 @@ static void updi_edge(uint32_t t, int lvl)
     {
         if (s_nf == 0U)
         {
+            if (s_ev_kind >= 0)
+            {
+                gapst_t *g = &s_gap[s_ev_kind];
+                uint32_t gap = t - s_ev_end;
+                if (g->n == 0U || gap < g->min) g->min = gap;
+                if (gap > g->max) g->max = gap;
+                g->last = gap;
+                g->n++;
+                s_ev_kind = -1;
+            }
             pe_now = t;
             if (!c->sync_gate())          /* disabled, or a SYNC outside its window: not taken */
             {
@@ -250,6 +268,10 @@ static void updi_edge(uint32_t t, int lvl)
     if (low > 1000U * pe_cyc_us)
     {
         s_breaks++;
+        s_ev_kind = 1;
+        s_ev_end = t;
+        s_gap[1].low_last = low;
+        if (low > s_gap[1].low_max) s_gap[1].low_max = low;
         s_nf = 0U;
         s_pend = 0U;
         pe_now = t;
@@ -261,6 +283,10 @@ static void updi_edge(uint32_t t, int lvl)
         if (low >= 20U * pe_cyc_us && s_nf <= 1U)    /* too long for a SYNC bit: the enable pulse */
         {
             s_nf = 0U;
+            s_ev_kind = 0;
+            s_ev_end = t;
+            s_gap[0].low_last = low;
+            if (low > s_gap[0].low_max) s_gap[0].low_max = low;
             pe_now = t;
             c->pulse();
         }
@@ -628,6 +654,11 @@ static unsigned long ns_of(uint32_t cyc)
     return (unsigned long)(((uint64_t)cyc * 1000U) / pe_cyc_us);
 }
 
+static unsigned long us_of(uint32_t cyc)
+{
+    return (unsigned long)(cyc / pe_cyc_us);
+}
+
 static void print_gap(const char *name, const gap_t *g)
 {
     if (g->min == 0xFFFFFFFFU)
@@ -682,6 +713,19 @@ static void print_stat(void)
                (unsigned long)s_tx_over,
                s_brr_last ? (unsigned long)(HAL_RCC_GetPCLK1Freq() / s_brr_last) : 0UL, (unsigned long)s_brr_last,
                ns_of(s_sync_last), s_sync_n ? ns_of(s_sync_min) : 0UL, ns_of(s_sync_max));
+    }
+    if (c->uart)
+    {
+        static const char *const nm[2] = { "pulse", "break" };
+        printf("PROG_EMU updi_gap_us");
+        for (unsigned i = 0; i < 2; i++)
+        {
+            const gapst_t *g = &s_gap[i];
+            printf(" %s_n=%lu %s_gap_min=%lu %s_gap_max=%lu %s_gap_last=%lu %s_low_last=%lu %s_low_max=%lu",
+                   nm[i], (unsigned long)g->n, nm[i], g->n ? us_of(g->min) : 0UL, nm[i], us_of(g->max),
+                   nm[i], us_of(g->last), nm[i], us_of(g->low_last), nm[i], us_of(g->low_max));
+        }
+        printf("\r\n");
     }
     if (c->stat != NULL)
     {
@@ -743,6 +787,8 @@ static void clear_counters(void)
     s_sync_n = s_bad_sync = s_breaks = s_u_fe = s_u_pe = s_u_ne = s_u_ore = s_u_rx = s_u_tx = 0U;
     s_sync_last = s_sync_max = 0U;
     s_sync_min = 0xFFFFFFFFU;
+    memset(s_gap, 0, sizeof s_gap);
+    s_ev_kind = -1;
 }
 
 /* ---------------------------------------------------------------- console */

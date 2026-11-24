@@ -280,6 +280,24 @@ static void test_flow(const tcase_t *tc)
     free(r);
 }
 
+/* A second job on the same chip: the first one's leave() left it switched off (UPDIDIS, or the
+   chip erased / reset), the next enter must bring it back with its own enable sequence. */
+static void test_reenter(const tcase_t *tc)
+{
+    const prog_proto_t *p = tc->proto;
+    rig_t *r = rig_new(tc);
+    CHECK(run(r, p->enter) == PROG_OK);
+    p->leave(&r->ctx, true);
+    memset(&r->ctx.state, 0, sizeof r->ctx.state);
+    r->ctx.phase = NULL;
+    r->ctx.id_len = 0;
+    CHECK(run(r, p->enter) == PROG_OK);
+    CHECK(r->ctx.id_len >= 2);
+    p->leave(&r->ctx, true);
+    report("second job", tc, r);
+    free(r);
+}
+
 static void test_locked(const tcase_t *tc)
 {
     const prog_proto_t *p = tc->proto;
@@ -356,6 +374,7 @@ int main(void)
     for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++)
     {
         test_flow(&cases[i]);
+        test_reenter(&cases[i]);
         test_locked(&cases[i]);
         test_stopped(&cases[i]);
     }

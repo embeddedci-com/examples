@@ -276,9 +276,9 @@ instead of those, not with them):
 
 What the pod is told (the node knows no device tables, the pod does not either): `page` is the chip's
 write page in bytes (the Memories column), and the PIC chips need `flags` for the command set and the
-code-protect bit, with `baud` holding the byte address of the config word that carries it:
+code-protect bit, with `cp_addr` holding the byte address of the config word that carries it:
 
-| `prog_emu` | `flags` | `baud` | `page` |
+| `prog_emu` | `flags` | `cp_addr` | `page` |
 |---|---|---|---|
 | `pic` | `PIC_F_CP_BIT(5) \| PIC_F_HAS_EE` = `0x504` | `0x1000E` | 16 |
 | `pic8` | `PIC_F_SET8 \| PIC_F_CP_BIT(1)` = `0x101` | `0x10016` | 32 |
@@ -338,6 +338,11 @@ timing missed late core_mhz`):
   the C2 enable wait). A protocol line follows (`PROG_EMU pic entries=.. bad_cmds=.. ...`).
 - `crc`: the CRC32 (zlib's) of every memory, in the byte layout of the table above, to compare with
   the image's.
+
+`PROG_EMU updi_gap_us` (UPDI only): for the enable pulse and for the BREAK, how many there were and the
+gap in us from the end of the low (its rising edge) to the first edge of the next SYNC (min, max, last), plus the
+length of the last and the longest low. It is measured whether or not the chip accepted the SYNC, so the bench
+sees the pod's real timing against the 200 us to 14 ms window (pulse) and the 5 ms after the BREAK's frame.
 
 UPDI details: the receiver is off while the chip waits for a frame. EXTI line 10 times the five
 falling edges of the SYNC byte (0x55), the baud rate is derived from them (the pod's UPDI links run at 115200 to 225000 baud), the receiver is switched on at the end of the

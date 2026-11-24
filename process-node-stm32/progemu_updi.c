@@ -263,7 +263,10 @@ static void stcs(unsigned reg, uint8_t v)
         }
         return;
     }
-    if (reg == 3 && (v & 4)) { c->disabled = 1; c->prog = 0; }
+    if (reg == 3 && (v & 4))               /* UPDIDIS: off until an enable pulse or a BREAK */
+    {
+        c->disabled = 1; c->prog = 0; c->enabled = 0; c->await = 0;
+    }
     c->cs[reg & 15] = v;
 }
 
@@ -431,6 +434,7 @@ static void brk(void)
     c->disabled = 0;
     c->cs[2] = c->cs[3] = 0;
     c->rpt = 0;
+    c->na = 0;
     /* a BREAK enables the UPDI: the SYNC must follow within a few ms of its frame (pe_break_frame_us
        after the line goes high again: the two stop bits at 300 baud) */
     c->enabled = 1;
@@ -445,6 +449,8 @@ static void pulse(void)
 {
     chip_t *c = &C;
     if (c->enabled) return;
+    c->disabled = 0;
+    c->ps = P_SYNC;
     c->enabled = 1;
     c->await = 1;
     c->pulses++;
@@ -471,7 +477,7 @@ static int sync_gate(void)
     return 1;
 }
 
-static int want_sync(void) { return C.ps == P_SYNC && !C.disabled; }
+static int want_sync(void) { return C.ps == P_SYNC; }
 
 static void chip_init(int nvm)
 {
