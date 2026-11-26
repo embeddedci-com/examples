@@ -62,7 +62,7 @@ While the pod hosts, its USB-C port belongs to the board: no USB console or USB 
 computer. Reach the pod over Ethernet (or the cloud); the pod refuses `usb_host` over its own USB.
 
 The pod needs a firmware built with `make USB_HOST=1` (development builds only for now); on a pod
-whose W25Q cannot be memory-mapped (before digital v3r4) also `XIP_RAM=1`, which the flash modes
+whose W25Q cannot be memory-mapped (before digital v4) also `XIP_RAM=1`, which the flash modes
 need.
 
 ## Build and flash
