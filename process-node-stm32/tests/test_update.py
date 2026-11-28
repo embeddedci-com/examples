@@ -36,8 +36,8 @@ def test_flash_and_boot(benchpod, wiring, node, pytestconfig, cycle):
         result = _flash(benchpod, wiring, firmware)
         took = time.monotonic() - start
         assert result.ok, f"flash cycle {cycle} failed after {took:.1f} s:\n{result.stderr}"
-        benchpod.power_off(wiring.efuse)
-        benchpod.power_on(wiring.efuse, delay=0.5)
+        benchpod.power_off(wiring.supply)
+        benchpod.power_on(wiring.supply, delay=0.5)
     node.uart.read_until("APP_OK", timeout=6)
     info = node.info()
     assert (info["fw"], info["version"]) == ("process-node", _expected_version()), info

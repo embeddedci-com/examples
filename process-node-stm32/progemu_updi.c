@@ -63,6 +63,7 @@ typedef struct {
     uint8_t enabled, await, busy_on;
     uint32_t t_open, t_close, busy_until, prog_at;
     uint32_t timing_viol, drops, pulses;
+    uint32_t bad_last;             /* the last bad frame: where (1 key, 2 opcode, 3 sync), its byte, the opcode */
     /* counters */
     uint32_t frames, bad_access, bad_frame, breaks, keys, chip_erases, resets;
     uint32_t st_words, st_bytes;
@@ -260,6 +261,7 @@ static void stcs(unsigned reg, uint8_t v)
             c->resets++;
             if (c->keyerase) unlock_erase();
             else if (c->keynvm && !c->locked) { c->prog = 1; c->prog_at = pe_now + 2000U * pe_cyc_us; }
+            else c->prog = 0;      /* a reset without the NVMProg key leaves programming mode (the CPU runs) */
             c->keynvm = 0;
             if (!c->prog) c->cs[7] &= ~0x10;
         }
@@ -320,7 +322,7 @@ static void args_done(void)
         k[8] = 0;
         if (!strcmp(k, "NVMProg ")) { c->keynvm = 1; c->cs[7] |= 0x10; c->keys++; }
         else if (!strcmp(k, "NVMErase")) { c->keyerase = 1; c->cs[7] |= 0x08; c->keys++; }
-        else c->bad_frame++;
+        else { c->bad_frame++; c->bad_last = 0x10000u | c->op; }
         c->ps = P_SYNC;
         break;
     }
@@ -410,7 +412,7 @@ static void decode_op(void)
         if (op & 4) { c->tx_sib++; reply((const uint8_t *)c->sib, 16); }
         else { c->cls = C_KEY; c->need = 8u << (op & 3); c->ps = P_ARGS; }
         break;
-    default: c->bad_frame++;
+    default: c->bad_frame++; c->bad_last = 0x20000u | ((uint32_t)op << 8) | op;
     }
 }
 
@@ -420,7 +422,7 @@ static void rx(uint8_t b)
     if (c->disabled || !c->enabled) return;
     switch (c->ps)
     {
-    case P_SYNC: if (b == 0x55) c->ps = P_OP; else c->bad_frame++; break;
+    case P_SYNC: if (b == 0x55) c->ps = P_OP; else { c->bad_frame++; c->bad_last = 0x30000u | ((uint32_t)b << 8) | c->op; } break;
     case P_OP: c->op = b; decode_op(); break;
     case P_ARGS: c->arg[c->na++] = b; if (c->na == c->need) args_done(); break;
     case P_DATA: c->arg[c->na++] = b; if (c->na == c->need) data_done(); break;
@@ -554,11 +556,11 @@ static const pe_counts_t *counts(void)
 static void stat(void)
 {
     printf("PROG_EMU updi nvm=%d frames=%lu bad_frame=%lu bad_access=%lu breaks=%lu keys=%lu "
-           "chip_erases=%lu resets=%lu st_words=%lu st_bytes=%lu pulses=%lu timing_viol=%lu drops=%lu locked=%u prog=%u rx_lds=%lu rx_ld=%lu rx_sts=%lu rx_st=%lu rx_ldcs=%lu rx_stcs=%lu rx_rep=%lu rx_key_sib=%lu tx_ldcs=%lu tx_lds=%lu tx_ld=%lu tx_ptr=%lu tx_sib=%lu tx_ack=%lu\r\n",
+           "chip_erases=%lu resets=%lu st_words=%lu st_bytes=%lu pulses=%lu timing_viol=%lu drops=%lu bad_last=%05lx locked=%u prog=%u rx_lds=%lu rx_ld=%lu rx_sts=%lu rx_st=%lu rx_ldcs=%lu rx_stcs=%lu rx_rep=%lu rx_key_sib=%lu tx_ldcs=%lu tx_lds=%lu tx_ld=%lu tx_ptr=%lu tx_sib=%lu tx_ack=%lu\r\n",
            C.nvm, (unsigned long)C.frames, (unsigned long)C.bad_frame, (unsigned long)C.bad_access,
            (unsigned long)C.breaks, (unsigned long)C.keys, (unsigned long)C.chip_erases,
            (unsigned long)C.resets, (unsigned long)C.st_words, (unsigned long)C.st_bytes,
-           (unsigned long)C.pulses, (unsigned long)C.timing_viol, (unsigned long)C.drops, C.locked, C.prog,
+           (unsigned long)C.pulses, (unsigned long)C.timing_viol, (unsigned long)C.drops, (unsigned long)C.bad_last, C.locked, C.prog,
            (unsigned long)C.rx_ops[0], (unsigned long)C.rx_ops[2], (unsigned long)C.rx_ops[4],
            (unsigned long)C.rx_ops[6], (unsigned long)C.rx_ops[8], (unsigned long)C.rx_ops[12],
            (unsigned long)C.rx_ops[10], (unsigned long)C.rx_ops[14],
