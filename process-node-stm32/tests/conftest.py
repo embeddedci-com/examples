@@ -158,6 +158,17 @@ def bench_profile(benchpod, pytestconfig):
     return benchpod.load_wiring(WIRING_PROFILE)
 
 
+def _supply(pytestconfig, prof):
+    """--benchpod-supply, else the older --benchpod-efuse (1 = 5v, 2 = external), else the profile's."""
+    opt = pytestconfig.getoption("benchpod_supply", None)
+    if opt:
+        return opt
+    old = pytestconfig.getoption("benchpod_efuse", None)
+    if old:
+        return {1: "5v", 2: "external"}.get(int(old), "5v")
+    return prof.supply or "5v"
+
+
 @pytest.fixture(scope="session")
 def wiring(bench_profile, pytestconfig):
     """How THIS bench is wired, read from its wiring profile (wiring/process-node-stm32.json)."""
@@ -177,7 +188,7 @@ def wiring(bench_profile, pytestconfig):
         target=prof.swd_target or TARGET_CFG,
         uart_rx=la("uart_rx"),   # LA3: the pod samples the DUT's TX here
         uart_tx=la("uart_tx"),   # LA4: the pod drives the DUT's RX here
-        efuse=pytestconfig.getoption("benchpod_efuse") or prof.efuse or 1,
+        supply=_supply(pytestconfig, prof),     # the target supply: "5v" (internal eFuse) or "external"
         i2c_scl=la("i2c_scl"),   # LA1, PB8, the pod emulates the BMP280 here
         i2c_sda=la("i2c_sda"),   # LA2, PB9
         alarm=la("ALARM"),       # LA5, PB0, high while any alarm is active
@@ -215,17 +226,17 @@ def _flash(bp, wiring, firmware):
     result = None
     for attempt in range(FLASH_ATTEMPTS):
         if attempt > 0:
-            bp.power_off(wiring.efuse)
+            bp.power_off(wiring.supply)
         result = bp.flash(
             file=firmware, target=wiring.target,
             swclk=wiring.swclk, swdio=wiring.swdio, nreset=wiring.nreset,
-            target_power=wiring.efuse, check=False,
+            target_power=wiring.supply, check=False,
         )
         if not result.ok and result.target_unreachable and wiring.nreset:
             result = bp.flash(
                 file=firmware, target=wiring.target,
                 swclk=wiring.swclk, swdio=wiring.swdio, nreset=False,
-                target_power=wiring.efuse, check=False,
+                target_power=wiring.supply, check=False,
             )
         if result.ok:
             break
@@ -438,8 +449,8 @@ def node(benchpod, wiring, pytestconfig):
     if firmware:
         result = _flash(benchpod, wiring, firmware)
         assert result.ok, f"flash failed; openocd output:\n{result.stderr}"
-    benchpod.power_off(wiring.efuse)
-    benchpod.power_on(wiring.efuse, delay=1.5)
+    benchpod.power_off(wiring.supply)
+    benchpod.power_on(wiring.supply, delay=1.5)
     n = Node(benchpod, wiring)
     try:
         n.open()
@@ -452,7 +463,7 @@ def node(benchpod, wiring, pytestconfig):
         yield n
     finally:
         n.close()
-        benchpod.power_off(wiring.efuse)
+        benchpod.power_off(wiring.supply)
 
 
 def _sensor_mv(temp_c):

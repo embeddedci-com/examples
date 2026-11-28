@@ -26,11 +26,11 @@ DROPOUT_S = [0.005, 0.05, 0.5]
 
 @pytest.mark.hardware
 def test_boot_time(benchpod, wiring, node):
-    benchpod.power_off(wiring.efuse)
+    benchpod.power_off(wiring.supply)
     time.sleep(0.5)
     node.uart.read()
     start = time.monotonic()
-    benchpod.power_on(wiring.efuse)
+    benchpod.power_on(wiring.supply)
     node.uart.read_until("APP_OK", timeout=POWER_ON_READY_S)
     ready_s = time.monotonic() - start
     info = node.info()
@@ -43,7 +43,7 @@ def test_boot_time(benchpod, wiring, node):
 def test_idle_current(benchpod, wiring, node):
     node.ctl("off")
     node.aout("off")
-    prof = benchpod.measure_power(1.0, efuse=wiring.efuse)
+    prof = benchpod.measure_power(1.0, supply=wiring.supply)
     ma, peak = prof.avg_current * 1000, prof.peak_current * 1000
     lo, hi = IDLE_MA
     assert not prof.fault, prof
@@ -55,12 +55,12 @@ def test_idle_current(benchpod, wiring, node):
 def test_regulating_current(benchpod, wiring, node, plant):
     node.ctl("off")
     node.aout("off")
-    idle = benchpod.measure_power(1.0, efuse=wiring.efuse).avg_current * 1000
+    idle = benchpod.measure_power(1.0, supply=wiring.supply).avg_current * 1000
     node.aout("200")
     plant(AMBIENT_C)
     node.ctl("on 60")
     time.sleep(1.0)
-    busy = benchpod.measure_power(1.0, efuse=wiring.efuse).avg_current * 1000
+    busy = benchpod.measure_power(1.0, supply=wiring.supply).avg_current * 1000
     assert busy - idle <= REGULATING_EXTRA_MA, \
         f"regulating draws {busy:.1f} mA vs {idle:.1f} mA idle"
 
@@ -71,8 +71,8 @@ def test_supply_dropout(benchpod, wiring, node, dropout):
     """A dropout of ``dropout`` seconds: the node either rode it out or rebooted cleanly."""
     before = int(node.info()["uptime_ms"])
     t_off = time.monotonic()
-    benchpod.power_off(wiring.efuse)
-    benchpod.power_on(wiring.efuse, delay=dropout)
+    benchpod.power_off(wiring.supply)
+    benchpod.power_on(wiring.supply, delay=dropout)
     off_for = time.monotonic() - t_off
     # Whichever happened, the console must answer within the reboot time.
     deadline = time.monotonic() + POWER_ON_READY_S

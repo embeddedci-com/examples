@@ -45,10 +45,10 @@ def test_uptime_advances(node):
 
 @pytest.mark.hardware
 def test_power_cycle_reports_power_on(benchpod, wiring, node):
-    benchpod.power_off(wiring.efuse)
+    benchpod.power_off(wiring.supply)
     time.sleep(0.5)
     node.uart.read()
-    benchpod.power_on(wiring.efuse)
+    benchpod.power_on(wiring.supply)
     _await_boot(node, POWER_ON_BOOT_S)
     info = node.info()
     assert info["reset"] == "power-on", info

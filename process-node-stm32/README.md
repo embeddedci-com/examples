@@ -311,7 +311,9 @@ per 2 us edge.
 
 **Polling, not one interrupt per edge.** For the two-wire chips the first edge of a burst wakes an interrupt
 (EXTI, priority 0), which then watches GPIOB's clock, reset and data pins in a tight loop (a look every
-few cycles) until the pod has been quiet for 100 us, and returns. Other interrupts wait meanwhile (the console is
+few cycles) until the pod has been quiet for 1 ms, and returns. (It used to leave after 100 us, which is about
+the pod's wait between PIC18 Q Program Data commands: the loop then left and came back mid-stream, and the
+PIC18 jobs failed verify now and then or counted early commands.) Other interrupts wait meanwhile (the console is
 not served during a burst; the watchdog is kicked from the loop). Three things keep the handler short:
 - **The pin moves first.** After each edge the chip model is asked (`peek`) what it will drive after the next
   one; when that edge is noticed, PB12 is switched to it before the model runs (the model's own answer then
@@ -344,15 +346,16 @@ on the wire as soon as the falling edge has let the previous one go (the start b
 edge, and the pod drops it). A pod that sampled with the clock low would see the next bit one clock early; none
 of the pod's read paths does. The trace shows both edges, so the waveform is visible.
 
-**PIC read shift (open).** On the bench every PIC ID word the pod reads is twice the expected value on the 6-bit
-set (device word 0x00A4 read as 0x0148) and half on the 8-bit sets. The node's trace of one `info` shows the
-line carrying the right frame: 16 clock pulses after the read command, the start bit (0) in the first, then
-0x1482 (DEV 0xA4 << 5 | REV 2) LSB first, then the stop bit; driving each bit early (before its rising edge)
-changed nothing. Both the pod's read path and the emulator's frame look right on their own, and the cause is
-not established. `prog_emu <pic> skew <n>` emits the frame n clocks early (n > 0) or late for a diagnostic run
-(the console says SKEWED), and the test `test_pic_read_skew_probe` prints the IDs read at skew 0, 1 and -1:
-if skew 1 gives the right ID, the pod's samples lag the frame by one clock. The PIC and UPDI HIL tests are
-marked `xfail` (not strict, the counts are still printed) until this and the UPDI no-reply are resolved.
+**Diagnostics in `prog_emu stat`.** `rdcheck bad_rises` counts rising clock edges where the data line was not
+what the chip drove (0 on a good run); `pic_lastrd` lists the last four PIC reads (PC:value), so a pod-side
+`verify failed` at `at_addr` can be checked against what the emulator served; the `updi` line's `bad_last`
+says where the last bad frame came from (1 key, 2 opcode, 3 a byte where a SYNC was due), with that byte and
+the opcode before it. `prog_emu <pic> skew <n>` emits a read frame n clocks early (n > 0) or late for a
+diagnostic run (the console says SKEWED); `test_pic_read_skew_probe` prints the IDs read at skew 0, 1 and -1.
+
+**UPDI on pod firmware 4.0.7 and older.** Those pods cut off the closing `STCS CTRLB UPDIDIS` frame after its
+first byte (benchpod-firmware#293), and the emulator counts that byte as a bad frame (`bad_last=3fd8b`). The
+UPDI erase-and-flash test is expected to fail on those pods and pass on later ones.
 
 **What the node cannot do exactly.** All of it runs from interrupts (at 128 MHz while an emulator runs):
 - C2 specifies the chip driving C2D within nanoseconds of the rising edge, and the pod's feed reads
@@ -427,7 +430,7 @@ pytest process-node-stm32/tests -v --benchpod-connection=<host or embeddedci:nam
     --benchpod-firmware=process-node-stm32/build/process-node.elf
 ```
 
-Without `--benchpod-firmware` the tests use the firmware already on the board.
+Needs `embeddedci` 4.0.7 or later (the tests use its `supply` names). Without `--benchpod-firmware` the tests use the firmware already on the board.
 `--soak N` runs every hardware test N times and ends with a per-test pass-rate table
 (flaky tests at the top). Set
 `CAN_NODE_OSC_MHZ=16` for a 16 MHz module (adds the 1 Mbit/s case).

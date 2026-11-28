@@ -31,18 +31,18 @@ def rl78(benchpod, wiring, node):
     if not benchpod.supports("uart_hd"):
         pytest.skip("the pod's firmware has no one-wire UART (uart_hd, gateware v57): update it")
     with node.paused():
-        benchpod.power_off(wiring.efuse)
+        benchpod.power_off(wiring.supply)
         time.sleep(0.5)
-        benchpod.power_on(wiring.efuse)
+        benchpod.power_on(wiring.supply)
         time.sleep(POWER_SETTLE_S)
         prog = Rl78Programmer(benchpod, wiring.uart_rx)
         try:
             yield prog
         finally:
             prog.close()
-            benchpod.power_off(wiring.efuse)
+            benchpod.power_off(wiring.supply)
             time.sleep(0.5)
-    benchpod.power_on(wiring.efuse)
+    benchpod.power_on(wiring.supply)
     node.uart.read_until("APP_OK", timeout=POWER_SETTLE_S + 5)
 
 
@@ -128,8 +128,8 @@ def test_security(rl78):
 def test_normal_boot_is_unchanged(benchpod, wiring, rl78):
     """Without the strap the node boots as before (the emulator never starts by accident)."""
     rl78.close()
-    benchpod.power_off(wiring.efuse)
+    benchpod.power_off(wiring.supply)
     time.sleep(0.5)
     with benchpod.open_uart(rx=wiring.uart_rx, tx=wiring.uart_tx, baud=115200) as uart:
-        benchpod.power_on(wiring.efuse)
+        benchpod.power_on(wiring.supply)
         uart.expect("APP_OK", timeout=POWER_SETTLE_S + 5)

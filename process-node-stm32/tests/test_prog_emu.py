@@ -227,6 +227,8 @@ def emu(benchpod, wiring, node):
     if stage is None:
         pytest.skip("staging an image needs the pod over the LAN (TCP) or the cloud")
     e = Emu(benchpod, node, stage)
+    ver = str(benchpod.status().get("version", "0"))
+    e.pod_version = tuple(int(x) for x in re.findall(r"\d+", ver)[:3]) or (0,)
     try:
         yield e
     finally:
@@ -234,27 +236,23 @@ def emu(benchpod, wiring, node):
         benchpod.apply_pin_directions()            # the profile's directions again
 
 
-# Open problems, kept visible: the run prints the counts, the test is expected to fail.
-XFAIL = {
-    "pic": "PIC ID words read at twice their value (6-bit) / half (8-bit): the trace shows the node's pins "
-           "carrying the right frame, start bit on the first rising edge; cause not established "
-           "(see README, PIC read shift)",
-    "pic8": "same as pic", "pic18": "same as pic", "pic18q10": "same as pic",
-    "updi": "UPDI: the node never answers (tx=0); see prog_emu trace and the README", "updimega": "same as updi",
-    "updi2": "same as updi",
-}
+# Pod firmware 4.0.7 and older cut the closing UPDIDIS frame off after its first byte (it disabled
+# its UART with the frame still in the TX FIFO, benchpod-firmware#293): the emulator counts that
+# byte as a bad frame, so a full UPDI job is expected to fail on those pods.
+UPDI_CLOSE_FIXED = (4, 0, 8)
 
 
 def _params():
-    out = []
-    for name in CASES:
-        marks = [pytest.mark.xfail(reason=XFAIL[name], strict=False)] if name in XFAIL else []
-        out.append(pytest.param(name, marks=marks, id=name))
-    return out
+    return [pytest.param(name, id=name) for name in CASES]
 
 
 @pytest.fixture(params=_params())
 def case_name(request, emu):
+    if CASES[request.param].get("uart") and emu.pod_version < UPDI_CLOSE_FIXED \
+            and request.node.originalname == "test_erase_chip_and_flash":
+        request.node.add_marker(pytest.mark.xfail(
+            reason=f"pod firmware {'.'.join(map(str, emu.pod_version))} cuts off the closing UPDIDIS frame "
+                   "(benchpod-firmware#293)", strict=False))
     yield request.param
     emu.stop()                                  # the node's own pins back after every test
 
