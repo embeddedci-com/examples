@@ -46,7 +46,7 @@
 #include <string.h>
 
 #define FW_NAME "process-node"
-#define FW_VERSION "0.3.4"
+#define FW_VERSION "0.3.5"
 
 #define CMD_BUF_SIZE 200
 

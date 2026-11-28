@@ -56,6 +56,7 @@ typedef struct {
     uint32_t ts;            /* cycle stamp of the last clock fall / rise, or of the reset edge */
     uint32_t busy_us;       /* wait the next command must observe, in us */
     /* counters */
+    uint32_t lrd_pc[4], lrd_v[4], nlrd;   /* the last reads served: PC and value */
     uint32_t cmds, timing_err, bad_cmds, ran, entries, bulk, rowerase, programs, bad_key;
 } chip_t;
 
@@ -315,7 +316,9 @@ static void cmd_done(void)
     if (r)
     {
         int inc = c->set8 && c->cmd == 0xFE;
+        uint32_t pc0 = c->pc;
         c->frame = rd(c->cmd == 0x05, inc) << 1;
+        c->lrd_pc[c->nlrd & 3] = pc0; c->lrd_v[c->nlrd & 3] = c->frame >> 1; c->nlrd++;
         c->st = S_PR;
         return;
     }
@@ -489,6 +492,10 @@ static void stat(void)
            (unsigned long)C.entries, (unsigned long)C.bad_key, (unsigned long)C.ran,
            (unsigned long)C.bad_cmds, (unsigned long)C.timing_err, (unsigned long)C.programs,
            (unsigned long)C.bulk, (unsigned long)C.rowerase, locked());
+    printf("PROG_EMU pic_lastrd n=%lu", (unsigned long)C.nlrd);
+    for (uint32_t i = C.nlrd > 4 ? C.nlrd - 4 : 0; i < C.nlrd; i++)
+        printf(" %lx:%04lx", (unsigned long)C.lrd_pc[i & 3], (unsigned long)C.lrd_v[i & 3]);
+    printf("\r\n");
 }
 
 /* the memories as bytes: words little endian */

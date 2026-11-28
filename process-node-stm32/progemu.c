@@ -183,7 +183,15 @@ static void fill_do(void *p, uint32_t n, uint16_t v, uint8_t w)
 {
     if (w == 1U)
     {
-        memset(p, (int)v, n);
+        /* word stores: newlib-nano's memset goes byte by byte, and a 16 KB chip erase run from the
+           UPDI interrupt (no deferral there) took ~0.9 ms, long enough to overrun the USART */
+        uint8_t *b = p;
+        while (n && ((uintptr_t)b & 3U)) { *b++ = (uint8_t)v; n--; }
+        uint32_t *q = (uint32_t *)(void *)b, x = 0x01010101U * (uint8_t)v;
+        for (; n >= 16U; n -= 16U, q += 4) { q[0] = x; q[1] = x; q[2] = x; q[3] = x; }
+        for (; n >= 4U; n -= 4U) *q++ = x;
+        b = (uint8_t *)q;
+        while (n--) *b++ = (uint8_t)v;
     }
     else
     {
@@ -230,6 +238,7 @@ static void fill_flush(void)
     }
 }
 
+static uint32_t s_rdbad, s_rdbad_first;   /* rising edges where the line was not what the chip drove */
 static uint32_t s_trn, s_evn, s_poll_entries, s_react_max, s_react_sum, s_react_n, s_proc_max, s_proc_sum, s_proc_n;
 
 
@@ -237,6 +246,7 @@ static void stats_reset(void)
 {
     s_edges = s_rise = s_fall = s_missed = s_late = s_nrst_edges = 0U;
     s_trn = s_evn = 0U;
+    s_rdbad = s_rdbad_first = 0U;
     s_poll_entries = s_react_max = s_react_sum = s_react_n = s_proc_max = s_proc_sum = s_proc_n = 0U;
     memset(&s_hi, 0, sizeof s_hi);
     memset(&s_lo, 0, sizeof s_lo);
@@ -679,7 +689,8 @@ static void updi_stop(void)
 /* The bit stream is followed by polling, not by one interrupt per edge. The first edge of a burst
    wakes an interrupt (EXTI15_10 or EXTI0, priority 0); this loop then watches the EXTI pending bits
    of the clock, reset and data lines (they are set by every edge, interrupt masked or not, and the
-   handler is not re-entered) and stays until the lines have been quiet for 100 us. An edge is
+   handler is not re-entered) and stays until the lines have been quiet for 1 ms (100 us was the pod's PIC18 Q
+   TPINT wait: leaving and re-entering between those commands damaged the stream). An edge is
    timestamped about 20 cycles (150 ns at 128 MHz) after it happened, and an edge that arrives while
    the previous one is still handled is counted (`late`), a pending bit whose level did not change
    (two edges between two looks) is `missed`. Other interrupts wait while the loop runs; the
@@ -693,7 +704,7 @@ static void pe_poll(const pe_chip_t *c)
 {
     s_poll_entries++;
     uint32_t idle_t = DWT->CYCCNT;
-    const uint32_t idle_lim = 100U * pe_cyc_us;
+    const uint32_t idle_lim = 1000U * pe_cyc_us;
     uint32_t spin = 0U, n = 0U;
     uint32_t prev = s_prev_idr;
     s_defer = 1U;
@@ -731,6 +742,10 @@ static void pe_poll(const pe_chip_t *c)
         idle_t = t;
         int before = s_drv;                    /* what the chip drove when the edge came */
         s_chg = 0U;
+        if ((ch & CLK_LINE) && ((idr >> 14) & 1U) && before >= 0 && (int)((idr >> 12) & 1U) != before)
+        {
+            if (s_rdbad++ == 0U) s_rdbad_first = s_edges;
+        }
         /* the pin first, from what the chip was going to drive after this edge, then the model */
         if ((ch & CLK_LINE) && s_pv != s_drv)
         {
@@ -1072,6 +1087,8 @@ static void print_stat(void)
                (unsigned long)s_poll_entries, (unsigned long)s_react_n, ns_of(s_react_max),
                s_react_n ? ns_of(s_react_sum / s_react_n) : 0UL, ns_of(s_proc_max),
                s_proc_n ? ns_of(s_proc_sum / s_proc_n) : 0UL);
+        printf("PROG_EMU rdcheck bad_rises=%lu first_edge=%lu (line level at a rising edge != what the chip drove)\r\n",
+               (unsigned long)s_rdbad, (unsigned long)s_rdbad_first);
         print_gap("high", &s_hi);
         print_gap("low", &s_lo);
         print_bins("high", &s_hi);
